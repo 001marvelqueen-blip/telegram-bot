@@ -57,10 +57,6 @@ import path from "node:path";
 
 import type { rpc } from "@stellar/stellar-sdk";
 
-import type { BotConfig } from "./config.js";
-import { clip, formatEvent } from "./notifications/format.js";
-import { eventCursorLedger, readContractEvents, type WatchTarget } from "./stellar/events.js";
-import type { ContractSource, DecodedEvent } from "./stellar/decode.js";
 import type { Metrics } from "./metrics.js";
 import type { SendExtra } from "./bot.js";
 import { appendAuditFile, auditEntry, createAuditLog, type AuditLog } from "./audit.js";
@@ -77,7 +73,13 @@ import {
   InstanceLockError,
   type InstanceLockHandle,
 } from "./instanceLock.js";
-import { explorerKeyboard, formatEvent, formatPlainTextEvent, safeErrorMessage } from "./notifications/format.js";
+import {
+  clip,
+  explorerKeyboard,
+  formatEvent,
+  formatPlainTextEvent,
+  safeErrorMessage,
+} from "./notifications/format.js";
 import { isNotificationAllowed } from "./notifications/featureFlags.js";
 import { buildStatusSnapshot, writeStatusFile, type StatusSnapshot } from "./status.js";
 import { validateLedgerWindow, type LedgerWindow } from "./stellar/client.js";
@@ -520,30 +522,11 @@ export function extractRetryAfterMs(err: unknown): number | null {
  */
 const MAX_FLOOR_REWINDS = 3;
 
-/**
- * Maximum bytes of a remote error message to include in logs or status.
- * An RPC or Telegram error body can be arbitrarily large; cap it so a status
- * response or a log line is never the thing that takes the bot down.
- */
-const MAX_ERROR_MSG_BYTES = 200;
-
-/**
- * The backoff multiplier applied when MAX_CONSECUTIVE_FAILURES is reached.
- * 10× pollIntervalMs means a 30 s interval becomes 5 minutes.
- */
-const BACKOFF_MULTIPLIER = 10;
-
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
 
-function errMessage(err: unknown): string {
-  const raw = err instanceof Error ? err.message : String(err);
-  // Clip at the byte level so multi-byte sequences do not leave a broken
-  // character at the boundary.
-  if (Buffer.byteLength(raw, "utf8") <= MAX_ERROR_MSG_BYTES) return raw;
-  return `${Buffer.from(raw, "utf8").subarray(0, MAX_ERROR_MSG_BYTES - 1).toString("utf8")}…`;
 /**
  * Wait for `promise`, resolving `false` if `timeoutMs` elapses first.
  *
@@ -1421,6 +1404,8 @@ export function createPoller(deps: PollerDeps) {
         metrics?.staleCursorEvents.inc();
       }
     }
+  }
+
   /**
    * Append buffered audit entries to the JSONL audit trail. Failure to audit
    * must never take the loop down (or even warn every cycle if the disk is
@@ -1516,30 +1501,25 @@ export function createPoller(deps: PollerDeps) {
     skipped: number;
   }
 
-  async function notify(events: DecodedEvent[]): Promise<NotificationResult> {
+  async function notify(
+    events: DecodedEvent[],
+    correlationId: string,
+  ): Promise<NotificationResult> {
     let sentThisCycle = 0;
     let failed = 0;
     let skipped = 0;
     let droppedForShutdown = 0;
+    let capLogged = false;
 
     for (const event of events) {
       metrics?.eventsDecoded.inc();
 
-      if (event.payload.name === "unknown") {
-        status.eventsSkipped += 1;
-        metrics?.eventsSkipped.inc();
-        // Clip the event name and reason: these come from remote contract data
-        // and must not produce unbounded log output.
-        const safeName = clip(event.payload.eventName ?? "", 80);
-        const safeReason = event.payload.reason ? ` (${clip(event.payload.reason, 120)})` : "";
-        console.log(
-          `[poller] skipped ${event.source} event "${safeName}" ` +
-            `at ledger ${event.ledger}${safeReason}`,
       if (isAdminPayload(event.payload)) {
         status.eventsSkipped += 1;
+        metrics?.eventsSkipped.inc();
         skipped += 1;
-        const audit = toAdminAuditRecord(event, config);
-        const adminPart = audit?.admin ? ` admin=${boundedLabel(audit.admin, 56)}` : "";
+        const adminAudit = toAdminAuditRecord(event, config);
+        const adminPart = adminAudit?.admin ? ` admin=${boundedLabel(adminAudit.admin, 56)}` : "";
         console.log(
           `[poller] logged admin event "${boundedLabel(event.payload.name, 80)}"${adminPart} ` +
             `at ledger ${event.ledger}`,
@@ -1549,6 +1529,7 @@ export function createPoller(deps: PollerDeps) {
 
       if (event.payload.name === "unknown") {
         status.eventsSkipped += 1;
+        metrics?.eventsSkipped.inc();
         skipped += 1;
         audit.record(
           auditEntry("event_skipped", {
@@ -1558,12 +1539,13 @@ export function createPoller(deps: PollerDeps) {
               (event.payload.reason ? `: ${event.payload.reason}` : ""),
           }),
         );
+        // Event name and reason come from remote contract data: bound them so
+        // they cannot produce unbounded log output.
         console.log(
-          `[poller] correlation=${correlationId} skipped ${event.source} event "${boundedLabel(event.payload.eventName, 80)}" ` +
+          `[poller] skipped ${event.source} event "${boundedLabel(event.payload.eventName, 80)}" ` +
             `at ledger ${event.ledger}` +
-            (event.payload.reason
-              ? ` (${boundedLabel(event.payload.reason, 160)})`
-              : ""),
+            (event.payload.reason ? ` (${boundedLabel(event.payload.reason, 160)})` : "") +
+            ` correlation=${correlationId}`,
           {
             action: "event_skipped",
             source: event.source,
@@ -1577,6 +1559,7 @@ export function createPoller(deps: PollerDeps) {
 
       if (!isNotificationAllowed(config.featureFlags, event.source, event.payload.name)) {
         status.eventsSkipped += 1;
+        metrics?.eventsSkipped.inc();
         skipped += 1;
         console.log(
           `[poller] feature-flag skipped ${event.source} event "${boundedLabel(event.payload.name, 80)}" ` +
@@ -1618,6 +1601,7 @@ export function createPoller(deps: PollerDeps) {
         }
       } catch (err) {
         status.eventsSkipped += 1;
+        metrics?.eventsSkipped.inc();
         skipped += 1;
         Logger.error(
           "poller",
@@ -1646,37 +1630,13 @@ export function createPoller(deps: PollerDeps) {
         continue;
       }
 
-        const routeConfig = { ...config, channelPreviewMode: route.channelPreviewMode };
-        const text = formatEvent(routeConfig, event);
-        
-        if (text === null) {
-          continue;
-        }
-        routeProcessed = true;
-
-        try {
-          // Use bounded retry for Telegram sends to handle transient failures
-          await sendWithRetry((t) => send(route.chatId, t), text, config.botToken);
-          status.notificationsSent += 1;
-          sentThisCycle += 1;
-        } catch (err) {
-          // All retries exhausted; drop the message but continue processing others.
-          status.notificationsFailed += 1;
-          failed += 1;
-          console.error(
-            `[poller] send failed for ${event.payload.name} at ledger ${event.ledger} to chat ${route.chatId} after retries: ` +
-              errorMessage(err),
-          );
-        }
-
-        if (sentThisCycle < config.maxNotificationsPerCycle) await sleep(SEND_SPACING_MS);
-      }
-      
-      if (!routeProcessed) {
+      if (sentThisCycle >= config.maxNotificationsPerCycle) {
         status.eventsSkipped += 1;
         metrics?.eventsSkipped.inc();
-        // Log clearly that the cap was reached, not just that an event was dropped.
-        if (sentThisCycle === config.maxNotificationsPerCycle) {
+        skipped += 1;
+        // One summary line per cycle names the knob; each drop is still logged.
+        if (!capLogged) {
+          capLogged = true;
           console.warn(
             `[poller] MAX_NOTIFICATIONS_PER_CYCLE cap (${config.maxNotificationsPerCycle}) reached ` +
               `this cycle — remaining events skipped. ` +
@@ -1684,7 +1644,6 @@ export function createPoller(deps: PollerDeps) {
               `Cursor still advances; the chain is the record.`,
           );
         }
-        skipped += 1;
         audit.record(
           auditEntry("cap_reached", {
             source: event.source,
@@ -1694,8 +1653,8 @@ export function createPoller(deps: PollerDeps) {
           }),
         );
         console.warn(
-          `[poller] correlation=${correlationId} cycle notification cap (${config.maxNotificationsPerCycle}) reached; ` +
-            `dropping ${event.payload.name} at ledger ${event.ledger}`,
+          `[poller] cycle notification cap (${config.maxNotificationsPerCycle}) reached; ` +
+            `dropping ${event.payload.name} at ledger ${event.ledger} correlation=${correlationId}`,
           {
             action: "notification_cap_reached",
             maxNotificationsPerCycle: config.maxNotificationsPerCycle,
@@ -1709,11 +1668,17 @@ export function createPoller(deps: PollerDeps) {
 
       try {
         // Use bounded retry for Telegram sends to handle transient failures
-        await sendWithRetry((message) => send(message, event.source, extra), text, config.botToken, deps.sendOptions, () => !status.stopping, sleep);
+        await sendWithRetry(
+          (message) => send(message, event.source, extra),
+          text,
+          config.botToken,
+          deps.sendOptions,
+          () => !status.stopping,
+          sleep,
+        );
         status.notificationsSent += 1;
         metrics?.notificationsSent.inc();
         sentThisCycle += 1;
-        consecutiveSendFailures = 0;
       } catch (err) {
         // All retries exhausted. The event still counts as failed and the cursor
         // still advances — but the message is parked instead of dropped, so a
@@ -1726,66 +1691,21 @@ export function createPoller(deps: PollerDeps) {
           detail: `${event.payload.name} at ledger ${event.ledger}`,
         });
         console.error(
-          `[poller] correlation=${correlationId} send failed for ${event.payload.name} at ledger ${event.ledger} after retries: ` +
-            errorMessage(err),
-    );
-    consecutiveSendFailures += 1;
-    if (consecutiveSendFailures >= config.notificationsFailedAlertThreshold) {
-      const alertText = `⚠️ *Mimir notifier degraded*\nThe last ${consecutiveSendFailures} events failed to reach this channel due to repeated Telegram API errors\\. Some notifications were dropped\\.\nCheck the poller logs for details\\.`;
-      try {
-        await sendWithRetry(send, alertText, config.botToken);
-        console.log(`[poller] successfully delivered repeated-failures alert`);
-        consecutiveSendFailures = 0;
-      } catch (alertErr) {
-        console.error(`[poller] also failed to deliver repeated-failures alert: ` + errorMessage(alertErr));
+          `[poller] send failed for ${event.payload.name} at ledger ${event.ledger} after retries: ` +
+            `${errorMessage(err)} correlation=${correlationId}`,
+        );
+        if (deadLetterEnabled) {
+          await deadLetter.enqueue({
+            source: event.source,
+            ledger: event.ledger,
+            eventName: event.payload.name,
+            text,
+            error: err,
+          });
+          refreshDeadLetterStatus();
+        }
       }
-    }
 
-    return { sent: sentThisCycle, failed, skipped };
-  }
-  return true;
-});
-
-if (config.digestMode) {
-  const digestText = formatDigest(knownEvents);
-  if (!digestText) return;
-  try {
-    await send(digestText);
-    status.notificationsSent += 1;
-  } catch (err) {
-    status.notificationsFailed += 1;
-    console.error(`[poller] digest send failed: ${errMessage(err)}`);
-  }
-  return;
-}
-
-let sentThisCycle = 0;
-for (const event of knownEvents) {
-  const text = formatEvent(config, event);
-  if (text === null) {
-    status.eventsSkipped += 1;
-    continue;
-  }
-  if (sentThisCycle >= config.maxNotificationsPerCycle) {
-    status.eventsSkipped += 1;
-    continue;
-  }
-  try {
-    await send(text);
-    status.notificationsSent += 1;
-    sentThisCycle += 1;
-  } catch (err) {
-    status.notificationsFailed += 1;
-    console.error(`[poller] send failed: ${errMessage(err)}`);
-  }
-  if (sentThisCycle < config.maxNotificationsPerCycle) await sleep(SEND_SPACING_MS);
-}
-}
-
-      // Pace sends to stay under Telegram's ~20 messages/minute limit.
-      // interSendDelayMs is configurable via INTER_SEND_DELAY_MS.
-      if (sentThisCycle < config.maxNotificationsPerCycle && config.interSendDelayMs > 0) {
-        await sleep(config.interSendDelayMs);
       // Rate-limit spacing is the last thing a draining cycle should wait for.
       if (!status.stopping && sentThisCycle < config.maxNotificationsPerCycle && sendSpacing > 0) {
         await sleep(sendSpacing);
@@ -1800,6 +1720,34 @@ for (const event of knownEvents) {
     }
 
     return { sent: sentThisCycle, failed, skipped };
+  }
+
+  /**
+   * Replay parked sends before this cycle's events so a recovered channel
+   * catches up in order. Budgeted by the per-cycle cap so one recovery cannot
+   * flood the chat; never throws into the cycle.
+   */
+  async function flushDeadLetter(): Promise<void> {
+    if (!deadLetterEnabled || status.stopping) return;
+    try {
+      const flushed = await deadLetter.flush(async (text, entry) => {
+        await sendWithRetry(
+          (message) => send(message, entry.source as ContractSource),
+          text,
+          config.botToken,
+          deps.sendOptions,
+          () => !status.stopping,
+          sleep,
+        );
+      }, Math.max(0, config.maxNotificationsPerCycle));
+      if (flushed.sent > 0) {
+        status.notificationsSent += flushed.sent;
+        for (let i = 0; i < flushed.sent; i += 1) metrics?.notificationsSent.inc();
+      }
+    } catch (err) {
+      console.error(`[poller] dead-letter flush threw: ${errorMessage(err)}`);
+    }
+    refreshDeadLetterStatus();
   }
 
   /**
@@ -1940,7 +1888,6 @@ for (const event of knownEvents) {
     await rewindFromRetainedFloor(target, current);
   }
 
-  async function runCycle(): Promise<void> {
   async function cycle(): Promise<number | void> {
     if (inFlight) return;
     inFlight = true;
@@ -1949,9 +1896,9 @@ for (const event of knownEvents) {
     status.cycles += 1;
     const correlationId = randomUUID();
     status.lastCorrelationId = correlationId;
-    status.lastPollAt = Date.now();
+    const currentTime = now();
+    status.lastPollAt = currentTime;
     metrics?.pollCycles.inc();
-    status.lastPollAt = now();
 
     // A cycle gets a fresh view of the chain tip; every target in this cycle
     // reuses it instead of each paying for its own `getHealth()`.
@@ -2021,6 +1968,11 @@ for (const event of knownEvents) {
           // Read before the scan: the scan is what assigns the new cursor, and
           // an unchanged value is exactly what a stall looks like.
           const previousCursor = current.cursor;
+          // Shared per-cycle tip: the first target fetches it, the rest reuse
+          // it. A failed fetch is not cached, so this target fails on its own
+          // and a later target still retries. Bounded by the same scan budget,
+          // so a wedged `getHealth()` cannot stall the cycle.
+          const tip = await withTimeout(ledgerCache.get(server), SCAN_TIMEOUT_MS, "RPC health");
           const scan = await withTimeout(
             readContractEvents(server, target, {
               ledgerTip: tip,
@@ -2038,19 +1990,10 @@ for (const event of knownEvents) {
             "RPC scan",
           );
 
-        status.latestLedger = scan.latestLedger;
-        status.oldestLedger = scan.oldestLedger;
-
-        // Stale-cursor check runs on every successful scan so it catches the
-        // condition even when the cursor has not moved (empty pages).
-        checkStaleCursor(current, scan.oldestLedger);
-
-        current.lastError = null;
-        anyOk = true;
-        metrics?.rpcRequests.inc();
-
-        // Warn if this cursor is already behind the RPC's retention window.
-        checkStaleCursors(scan.oldestLedger);
+          metrics?.rpcRequests.inc();
+          // Stale-cursor check runs on every successful scan so it catches the
+          // condition even when the cursor has not moved (empty pages).
+          checkStaleCursors(scan.oldestLedger);
           status.latestLedger = scan.latestLedger;
           status.oldestLedger = scan.oldestLedger;
           current.lastError = null;
@@ -2150,7 +2093,7 @@ for (const event of knownEvents) {
           for (const id of scan.seenEventIds) dedupWindow.add(id);
           if (scan.events.length > 0) {
             markDirty();
-            delivery = await notify(scan.events);
+            delivery = await notify(scan.events, correlationId);
             const skippedText = delivery.skipped > 0 ? ` (${delivery.skipped} skipped)` : "";
             console.log(
               `[poller] ${target.source}: ${scan.events.length} event(s) ` +
@@ -2193,6 +2136,7 @@ for (const event of knownEvents) {
           trackCursorAdvance(current, previousCursor, scan.latestLedger);
         } catch (err) {
           cycleFailures++;
+          metrics?.rpcErrors.inc();
           current.consecutiveFailures += 1;
           const delayMs = Math.min(
             targetInitialBackoff * Math.pow(targetBackoffFactor, current.consecutiveFailures - 1),
@@ -2239,27 +2183,6 @@ for (const event of knownEvents) {
         }
       }
 
-        if (scan.lastEventLedger !== null) current.lastEventLedger = scan.lastEventLedger;
-        // The opaque cursor covers the whole returned page, so it cannot be
-        // committed per event. Commit after processing the page, including
-        // deliberate drops, to avoid replaying a permanent Telegram failure.
-        if (scan.cursor) {
-          current.cursor = scan.cursor;
-          if (delivery.failed > 0 || delivery.skipped > 0) {
-            console.warn(
-              `[poller] ${target.source}: committed cursor after partial delivery ` +
-                `(sent=${delivery.sent}, failed=${delivery.failed}, skipped=${delivery.skipped})`,
-            );
-          }
-        }
-        // Persist each target checkpoint before scanning the next contract.
-        await saveCursors();
-      } catch (err) {
-        const message = errMessage(err);
-        current.lastError = message;
-        status.lastError = { at: Date.now(), message: `${target.source}: ${message}` };
-        metrics?.rpcErrors.inc();
-        console.error(`[poller] ${target.source} scan failed: ${message}`);
       // ── Circuit breaker state update ─────────────────────────────────────────────
       if (cycleFailures > 0) {
         status.circuitBreaker.failureCount += cycleFailures;
@@ -2274,19 +2197,14 @@ for (const event of knownEvents) {
         }
       }
 
-    if (anyOk) {
-      status.lastSuccessAt = Date.now();
-      status.consecutiveFailures = 0;
-      metrics?.consecutiveFailures.set(0);
-    } else {
-      status.consecutiveFailures += 1;
-      metrics?.consecutiveFailures.set(status.consecutiveFailures);
-      emitCircuitBreakerWarning();
       if (anyOk) {
         status.lastSuccessAt = now();
         status.consecutiveFailures = 0;
+        metrics?.consecutiveFailures.set(0);
       } else {
         status.consecutiveFailures += 1;
+        metrics?.consecutiveFailures.set(status.consecutiveFailures);
+        emitCircuitBreakerWarning();
       }
     } finally {
       // The write and the tracking promise are what a shutdown waits for, so
@@ -2336,19 +2254,16 @@ for (const event of knownEvents) {
     if (stopped || paused || inFlight) return;
     let nextDelay = config.pollIntervalMs;
     try {
-      await runCycle();
       const delay = await cycle();
       if (typeof delay === "number" && delay > nextDelay) {
         nextDelay = delay;
       }
     } catch (err) {
-      // Belt and braces: `runCycle` already swallows per-target failures, so
+      // Belt and braces: `cycle` already swallows per-target failures, so
       // this only fires on a bug. Either way the loop survives it.
       status.consecutiveFailures += 1;
       metrics?.consecutiveFailures.set(status.consecutiveFailures);
       emitCircuitBreakerWarning();
-      status.lastError = { at: Date.now(), message: errMessage(err) };
-      console.error(`[poller] cycle threw: ${errMessage(err)}`);
       status.lastError = { at: now(), message: errorMessage(err) };
       audit.recordError(err, "cycle_failed");
       await flushAudit();
@@ -2562,7 +2477,9 @@ for (const event of knownEvents) {
      * real timers or starting the loop. Safe to call while the loop is
      * running too — `inFlight` ensures at most one cycle at a time.
      */
-    runCycle,
+    async runCycle(): Promise<void> {
+      await cycle();
+    },
 
     /**
      * Load cursor state from disk without starting the poll loop.
@@ -2604,125 +2521,3 @@ for (const event of knownEvents) {
 export { InstanceLockError };
 
 export type Poller = ReturnType<typeof createPoller>;
-
-
-/**
- * The grammy bot: commands, and the one send path the poller uses.
- *
- * The bot half is deliberately thin. It answers three commands and exposes
- * `notify()`; all chain logic lives in `src/poller.ts` and `src/stellar/`.
- */
-
-import { Bot } from "grammy";
-
-import { escapeMd } from "./notifications/format.js";
-import { networkLabel, type BotConfig } from "./config.js";
-import type { PollerStatus } from "./poller.js";
-
-const HELP = [
-  "*Mimir notifier*",
-  "",
-  "I watch Mimir's two Soroban contracts on Stellar and post every new on-chain event here: claims opened, challenges staked, oracle resolutions, settlements and payouts\\.",
-  "",
-  "/status — what I am watching and how far I have read",
-  "/help — this message",
-].join("\n");
-
-function ago(timestamp: number | null): string {
-  if (timestamp === null) return "never";
-  const seconds = Math.round((Date.now() - timestamp) / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
-  return `${Math.round(seconds / 3600)}h ago`;
-}
-
-function statusMessage(config: BotConfig, status: PollerStatus): string {
-  const lines: string[] = [
-    `*Status* — ${status.running ? "running" : "stopped"} on Stellar ${networkLabel(config)}`,
-    "",
-    `Chain tip: ${status.latestLedger ?? "unknown"}`,
-    `RPC retains from ledger: ${status.oldestLedger ?? "unknown"}`,
-    `Poll interval: ${Math.round(config.pollIntervalMs / 1000)}s · last poll ${ago(status.lastPollAt)}`,
-    `Cycles: ${status.cycles} · sent ${status.notificationsSent} · failed sends ${status.notificationsFailed} · skipped ${status.eventsSkipped}`,
-    "",
-    "*Watching*",
-  ];
-
-  for (const target of status.targets) {
-    lines.push(
-      `· mimir\\-${target.source} \`${target.contractId}\``,
-      `  last event ledger: ${target.lastEventLedger ?? "none seen"}`,
-      `  cursor: \`${target.cursor ?? "none (cold start)"}\``,
-    );
-    if (target.lastError) lines.push(`  last error: ${escapeMd(target.lastError)}`);
-  }
-
-  if (status.lastError) {
-    lines.push(
-      "",
-      `Last error \\(${ago(status.lastError.at)}\\): ${escapeMd(status.lastError.message)}`,
-    );
-  }
-  if (status.consecutiveFailures > 0) {
-    lines.push(`Consecutive failed cycles: ${status.consecutiveFailures}`);
-  }
-
-  return lines.join("\n");
-}
-
-export interface BotDeps {
-  config: BotConfig;
-  status: () => PollerStatus;
-}
-
-export function createBot(deps: BotDeps): Bot {
-  const { config, status } = deps;
-  const bot = new Bot(config.botToken);
-
-  bot.command("start", async (ctx) => {
-    await ctx.reply(HELP, { parse_mode: "MarkdownV2" });
-  });
-
-  bot.command("help", async (ctx) => {
-    await ctx.reply(HELP, { parse_mode: "MarkdownV2" });
-  });
-
-  bot.command("status", async (ctx) => {
-    await ctx.reply(statusMessage(config, status()), {
-      parse_mode: "MarkdownV2",
-      link_preview_options: { is_disabled: true },
-    });
-  });
-
-  // grammy rethrows handler errors by default, which would take the process
-  // with it. A malformed command must not be fatal.
-  bot.catch((err) => {
-    console.error(`[bot] handler error on update ${err.ctx.update.update_id}:`, err.error);
-  });
-
-  return bot;
-}
-
-/** The poller's send path: one message to the configured chat. */
-export function createNotifier(bot: Bot, config: BotConfig) {
-  return async (text: string): Promise<void> => {
-    await bot.api.sendMessage(config.chatId, text, {
-      parse_mode: "MarkdownV2",
-      link_preview_options: { is_disabled: true },
-    });
-  };
-}
-
-/** Registers the command list so Telegram's UI offers autocompletion. */
-export async function registerCommands(bot: Bot): Promise<void> {
-  try {
-    await bot.api.setMyCommands([
-      { command: "start", description: "What this bot does" },
-      { command: "help", description: "Show help" },
-      { command: "status", description: "Last-seen ledger and watched contracts" },
-    ]);
-  } catch (err) {
-    // Cosmetic. Never worth failing a boot over.
-    console.warn(`[bot] setMyCommands failed: ${err instanceof Error ? err.message : err}`);
-  }
-}
