@@ -357,19 +357,6 @@ export interface SendOptions {
  */
 export const DEFAULT_SEND_TIMEOUT_MS = 15_000 as const;
 
-export interface PollerDeps {
-  config: BotConfig;
-  server: rpc.Server;
-  /** Sends one already-formatted MarkdownV2 message. May reject. */
-  send: (text: string) => Promise<void>;
-  /**
-   * Optional metrics registry. When provided, the poller increments counters
-   * on every observable event. When absent (e.g. in tests that don't need it),
-   * the poller behaves identically but emits no metrics.
-   */
-  metrics?: Metrics | undefined;
-}
-
 /**
  * How many ledgers a cursor can lag behind the retained floor before the poller
  * warns. Events in the gap are already gone — this threshold makes the operator
@@ -386,6 +373,16 @@ const STALE_CURSOR_LEDGER_LAG = 12_096;
  * (10+) is highlighted loudly.
  */
 const CONSECUTIVE_FAILURE_THRESHOLDS = [5, 10, 25, 50, 100];
+
+export interface PollerDeps {
+  config: BotConfig;
+  server: rpc.Server;
+  /**
+   * Optional metrics registry. When provided, the poller increments counters
+   * on every observable event. When absent (e.g. in tests that don't need it),
+   * the poller behaves identically but emits no metrics.
+   */
+  metrics?: Metrics | undefined;
   /**
    * Sends one already-formatted MarkdownV2 message to the chat routed for
    * `source`, with the event's explorer button when `extra.reply_markup` is
@@ -1272,54 +1269,19 @@ export function createPoller(deps: PollerDeps) {
 
   // ── Cursor persistence ─────────────────────────────────────────────────────
 
-  /**
-   * Try to parse and apply a cursor file from `filePath`.
-   * Returns true when a valid file was found, false when missing.
-   * Throws on a parse or structural error so the caller can decide.
-   */
-  async function applyCursorFile(filePath: string): Promise<boolean> {
+  async function loadCursors(): Promise<void> {
     let raw: string;
     try {
-      raw = await readFile(filePath, "utf8");
+      raw = await readFile(config.cursorFile, "utf8");
     } catch {
-      return false; // file missing — not an error, just absent
+      console.log(
+        `[poller] no cursor file at ${config.cursorFile}; cold start ` +
+          `${config.startLookbackLedgers} ledgers behind the tip`,
+      );
+      return;
     }
 
-    const parsed = JSON.parse(raw) as CursorFile;
-    for (const [source, saved] of Object.entries(parsed.targets ?? {})) {
-      const target = state.get(source as ContractSource);
-      if (!target) continue;
-      target.cursor = saved.cursor ?? null;
-      target.lastEventLedger = saved.lastEventLedger ?? null;
-    }
-    return true;
-  }
-
-  async function checkCursorAge(filePath: string): Promise<void> {
-    if (!config.cursorMaxAgeMs) return;
     try {
-      const parsed = JSON.parse(raw) as Partial<CursorFile>;
-
-      // Version guard: if the field is absent or not 1, the file was written
-      // by a different version of this code. Cold-starting is safer than
-      // silently misreading an unknown layout.
-      if (parsed.version === undefined) {
-        console.warn(
-          `[poller] cursor file at ${config.cursorFile} has no version field; ` +
-            `cold-starting rather than risking a misread. Delete the file to suppress this.`,
-        );
-        return;
-      }
-      if (parsed.version !== 1) {
-        console.warn(
-          `[poller] cursor file version ${String(parsed.version)} is not supported ` +
-            `(expected 1); cold-starting. Delete the file or downgrade to the matching release.`,
-        );
-        return;
-      }
-
-      for (const [source, saved] of Object.entries(parsed.targets ?? {})) {
-        const target = state.get(source as ContractSource);
       const result = parseAndMigrateCursorFile(raw, { now: () => new Date(now()) });
       const parsed = result.file;
       for (const [source, saved] of Object.entries(parsed.targets)) {
@@ -1379,24 +1341,8 @@ export function createPoller(deps: PollerDeps) {
       const reason = errorMessage(err);
       await quarantineCorruptCursorFile(config.cursorFile, reason);
     }
-
-    console.log(
-      `[poller] no cursor file at ${config.cursorFile}; cold start ` +
-        `${config.startLookbackLedgers} ledgers behind the tip`,
-    );
   }
 
-  async function saveCursors(correlationId: string): Promise<void> {
-    const payload: CursorFile = {
-      version: 1,
-      updatedAt: new Date(nowFn()).toISOString(),
-      targets: Object.fromEntries(
-        [...state.values()].map((t) => [
-          t.source,
-          { cursor: t.cursor, lastEventLedger: t.lastEventLedger, version: t.version },
-        ]),
-      ),
-    };
   /**
    * Record that in-memory cursor state has moved ahead of the file, so a
    * shutdown knows there is something to flush even if the cycle that moved it
