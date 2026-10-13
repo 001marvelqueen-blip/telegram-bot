@@ -917,9 +917,6 @@ export function buildCursorFile(
 /** Timeout for each RPC scan request */
 const SCAN_TIMEOUT_MS = 15_000;
 
-/** Timeout for each Telegram send attempt */
-const SEND_TIMEOUT_MS = 10_000;
-
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -1066,7 +1063,11 @@ async function sendWithRetry(
 
   while (true) {
     try {
-      await withTimeout(send(text), SEND_TIMEOUT_MS, "Telegram send");
+      await withTimeout(
+        send(text),
+        opts?.sendTimeoutMs ?? DEFAULT_SEND_TIMEOUT_MS,
+        "Telegram send",
+      );
       return;
     } catch (err) {
       attempt++;
@@ -1135,6 +1136,16 @@ export function createPoller(deps: PollerDeps) {
   const audit: AuditLog = deps.audit ?? createAuditLog();
   const sendSpacing =
     deps.sendOptions?.sendSpacingMs ?? config.interSendDelayMs ?? DEFAULT_SEND_SPACING_MS;
+  // Per-attempt send budget: explicit option, then config (TELEGRAM_SEND_TIMEOUT_MS,
+  // or the `sendTimeoutMs` alias hand-built configs use), then the default.
+  const sendOptions: SendOptions = {
+    ...deps.sendOptions,
+    sendTimeoutMs:
+      deps.sendOptions?.sendTimeoutMs ??
+      config.sendTimeoutMs ??
+      config.telegramSendTimeoutMs ??
+      DEFAULT_SEND_TIMEOUT_MS,
+  };
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? defaultSleep;
   const targetInitialBackoff = deps.targetBackoffOptions?.initialBackoffMs ?? config.pollIntervalMs;
@@ -1752,7 +1763,7 @@ export function createPoller(deps: PollerDeps) {
           (message) => send(message, event.source, extra),
           text,
           config.botToken,
-          deps.sendOptions,
+          sendOptions,
           () => !status.stopping,
           sleep,
         );
@@ -1815,7 +1826,7 @@ export function createPoller(deps: PollerDeps) {
           (message) => send(message, entry.source as ContractSource),
           text,
           config.botToken,
-          deps.sendOptions,
+          sendOptions,
           () => !status.stopping,
           sleep,
         );

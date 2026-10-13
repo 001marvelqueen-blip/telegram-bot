@@ -250,6 +250,8 @@ export interface BotConfig extends StellarConfig {
   shutdownTimeoutMs: number;
   /** Wall-clock budget for a single Telegram send before it is abandoned. */
   telegramSendTimeoutMs: number;
+  /** Alias of `telegramSendTimeoutMs` accepted from hand-built configs. */
+  sendTimeoutMs?: number;
   /** When true, notifications sent to Telegram are formatted in preview mode. */
   channelPreviewMode: boolean;
   /** Show Telegram link previews on market notifications (LINK_PREVIEW_MARKET). */
