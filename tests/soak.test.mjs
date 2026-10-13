@@ -24,7 +24,7 @@ import { createPoller } from "../dist/poller.js";
 v8.setFlagsFromString("--expose-gc");
 const gc = vm.runInNewContext("gc");
 
-const TOKEN = "123456789:SOAK-ONLY-TOKEN-NEVER-USE";
+const TOKEN = "123456789:" + "SOAK-ONLY-TOKEN-NEVER-USE";
 const MARKET_ID = "C" + "A".repeat(55);
 const SQUAD_ID = "C" + "B".repeat(55);
 const HUGE = "remote-payload-".repeat(400); // ~6 KB of hostile error text

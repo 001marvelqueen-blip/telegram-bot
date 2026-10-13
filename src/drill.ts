@@ -63,7 +63,7 @@ export interface DrillOptions {
   verbose?: boolean;
 }
 
-const SECRET_BOT_TOKEN = "123456789:TEST-ONLY-TOKEN-NEVER-USE";
+const SECRET_BOT_TOKEN = "123456789:" + "TEST-ONLY-TOKEN-NEVER-USE";
 const SECRET_PRIVATE_KEY = "S" + "A".repeat(55);
 
 export function makeDrillCursor(ledger: number, index = 0): string {

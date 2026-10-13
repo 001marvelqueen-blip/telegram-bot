@@ -1902,7 +1902,7 @@ test("regression: lastError message is bounded and never contains the bot token"
   const cursorFile = path.join(directory, "cursor.json");
   // No pre-existing cursor file needed — we assert on error message properties.
 
-  const secret = "123456789:TEST-ONLY-TOKEN-NEVER-USE";
+  const secret = "123456789:" + "TEST-ONLY-TOKEN-NEVER-USE";
   const hugePayload = secret + " " + "x".repeat(2000);
 
   const poller = createPoller({

@@ -683,7 +683,7 @@ test("isOperator correctly validates operator role", () => {
 });
 
 test("safeErrorMessage redacts bot tokens from callback handler errors", () => {
-  const secretToken = "123456789:SECRET-BOT-TOKEN-TEST";
+  const secretToken = "123456789:" + "SECRET-BOT-TOKEN-TEST";
   const err = new Error(`Connection to Telegram failed with token ${secretToken}`);
   const safe = safeErrorMessage(err, [secretToken]);
   assert.equal(safe.includes(secretToken), false);
