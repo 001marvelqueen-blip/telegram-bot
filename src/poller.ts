@@ -52,7 +52,8 @@
  * the only resume token, in the same `version: 1` format as before.
  */
 
-import { mkdir, readFile, rename, writeFile, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { copyFile, mkdir, readFile, rename, writeFile, unlink } from "node:fs/promises";
 import path from "node:path";
 
 import type { rpc } from "@stellar/stellar-sdk";
@@ -80,6 +81,8 @@ import {
   formatPlainTextEvent,
   safeErrorMessage,
 } from "./notifications/format.js";
+import { formatSuppressedRepeats, LogSampler } from "./log-sampler.js";
+import { Logger } from "./logger.js";
 import { isNotificationAllowed } from "./notifications/featureFlags.js";
 import { buildStatusSnapshot, writeStatusFile, type StatusSnapshot } from "./status.js";
 import { validateLedgerWindow, type LedgerWindow } from "./stellar/client.js";
@@ -90,7 +93,13 @@ import {
   resumeCursorProblem,
   type WatchTarget,
 } from "./stellar/events.js";
-import { isAdminPayload, toAdminAuditRecord, type ContractSource, type DecodedEvent } from "./stellar/decode.js";
+import {
+  isAdminPayload,
+  normalizeContractVersion,
+  toAdminAuditRecord,
+  type ContractSource,
+  type DecodedEvent,
+} from "./stellar/decode.js";
 
 export interface TargetState {
   source: ContractSource;
@@ -232,6 +241,17 @@ export interface PollerStatus {
    * summarized in the log rather than dropped; surfaced here for `/status`.
    */
   suppressedLogs: number;
+  /** Dead-letter queue counters (see src/deadLetter.ts). */
+  deadLetter: DeadLetterStats;
+  /** Telegram sends abandoned by the per-send timeout, when tracked. */
+  sendTimeouts?: number;
+  /** Bounded description of the most recent send timeout, when tracked. */
+  lastSendTimeout?: string | null;
+  /** Result of the startup persistent-volume probe, when reported. */
+  persistentVolumeAvailable?: boolean;
+  persistentVolumeError?: string | null;
+  /** Explicit backoff (e.g. RPC Retry-After) currently applied, when known. */
+  currentBackoffMs?: number;
   targets: TargetState[];
   /** SHA-256 digest of the SBOM generated for this deployment image. */
   sbomDigest: string | null;
@@ -436,6 +456,15 @@ export interface ShutdownResult {
   waitedMs: number;
 }
 
+export interface TargetBackoffOptions {
+  /** Initial backoff delay in ms after first RPC failure for a target. Defaults to the poll interval. */
+  initialBackoffMs?: number;
+  /** Maximum backoff delay in ms for a target. Defaults to 60_000ms. */
+  maxBackoffMs?: number;
+  /** Exponential backoff factor. Defaults to 2. */
+  backoffFactor?: number;
+}
+
 export interface CircuitBreakerOptions {
   /** Number of consecutive failures before opening the circuit */
   failureThreshold?: number;
@@ -521,6 +550,41 @@ export function extractRetryAfterMs(err: unknown): number | null {
  * misbehaving or lying RPC cannot make the poller rewind forever.
  */
 const MAX_FLOOR_REWINDS = 3;
+
+/**
+ * Where a persisted cursor sits relative to the RPC's retained window.
+ *
+ * Exactly *at* the floor is inside the window: that ledger is still retained.
+ * A token that packs no real ledger (Stellar ledgers start at 1, so a TOID
+ * that decodes to 0 is not a position) is unreadable rather than "at ledger
+ * 0", because only positive evidence justifies moving a cursor.
+ */
+export type CursorWindowVerdict =
+  | { status: "no-cursor" }
+  | { status: "unknown-floor" }
+  | { status: "unreadable"; cursor: string }
+  | { status: "inside"; cursorLedger: number; behind: number }
+  | { status: "stale"; cursorLedger: number; missedLedgers: number };
+
+export function classifyCursorWindow(
+  cursor: string | null,
+  oldestLedger: number | null,
+): CursorWindowVerdict {
+  if (cursor === null || cursor === "") return { status: "no-cursor" };
+  if (oldestLedger === null || !Number.isFinite(oldestLedger) || oldestLedger <= 0) {
+    return { status: "unknown-floor" };
+  }
+
+  const cursorLedger = eventCursorLedger(cursor);
+  if (cursorLedger === null || cursorLedger <= 0) {
+    return { status: "unreadable", cursor };
+  }
+
+  if (cursorLedger < oldestLedger) {
+    return { status: "stale", cursorLedger, missedLedgers: oldestLedger - cursorLedger };
+  }
+  return { status: "inside", cursorLedger, behind: cursorLedger - oldestLedger };
+}
 
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {
@@ -1063,33 +1127,44 @@ export function buildDigests(
   return digests;
 }
 
-/**
- * If the error looks like a Telegram 429, return the number of seconds to
- * wait before the next request (from `parameters.retry_after`), otherwise
- * return null.
- */
-function telegram429RetryAfter(err: unknown): number | null {
-  if (!(err instanceof Error)) return null;
-  // grammy wraps Telegram errors as GrammyError with an `error_code` property.
-  const maybe = err as { error_code?: unknown; parameters?: { retry_after?: unknown } };
-  if (maybe.error_code !== 429) return null;
-  const retryAfter = maybe.parameters?.retry_after;
-  if (typeof retryAfter === "number" && retryAfter > 0) return retryAfter;
-  return TELEGRAM_429_BACKOFF_MS / 1000;
-}
-
 export function createPoller(deps: PollerDeps) {
   const { config, server, send } = deps;
   const metrics = deps.metrics;
   const audit: AuditLog = deps.audit ?? createAuditLog();
-  const sendSpacing = deps.sendOptions?.sendSpacingMs ?? DEFAULT_SEND_SPACING_MS;
+  const sendSpacing =
+    deps.sendOptions?.sendSpacingMs ?? config.interSendDelayMs ?? DEFAULT_SEND_SPACING_MS;
   const now = deps.now ?? Date.now;
+  const sleep = deps.sleep ?? defaultSleep;
   const targetInitialBackoff = deps.targetBackoffOptions?.initialBackoffMs ?? config.pollIntervalMs;
   const targetMaxBackoff = deps.targetBackoffOptions?.maxBackoffMs ?? DEFAULT_TARGET_MAX_BACKOFF_MS;
   const targetBackoffFactor = deps.targetBackoffOptions?.backoffFactor ?? DEFAULT_TARGET_BACKOFF_FACTOR;
   const circuitThreshold = deps.circuitBreakerOptions?.failureThreshold ?? DEFAULT_CIRCUIT_FAILURE_THRESHOLD;
   const circuitCooldown = deps.circuitBreakerOptions?.cooldownMs ?? DEFAULT_CIRCUIT_COOLDOWN_MS;
   const errorMessage = (err: unknown): string => safeErrorMessage(err, [config.botToken]);
+
+  // One key per failure source: a broken market contract must not silence the
+  // squad contract's errors, and a flapping one must not reset the other.
+  const errorSampler = new LogSampler({
+    maxPerWindow: config.logSampleMaxPerWindow,
+    windowMs: config.logSampleWindowMs,
+    now,
+  });
+
+  /**
+   * Print a repetitive error through the sampler. The first
+   * `LOG_SAMPLE_MAX_PER_WINDOW` lines per key and window are printed verbatim;
+   * repeats are counted; the line that opens the next window carries the number
+   * it held back, so a suppressed run is always reported.
+   */
+  const logSampledError = (key: string, line: string, fields?: Record<string, unknown>): void => {
+    const sample = errorSampler.record(key);
+    if (!sample.log) return;
+    Logger.error(
+      "poller",
+      `${line}${formatSuppressedRepeats(sample.suppressed, errorSampler.windowMs)}`,
+      fields,
+    );
+  };
   const boundedLabel = (value: unknown, max = 120): string => {
     const compact = String(value).replace(/\s+/g, " ").trim() || "unknown";
     return compact.length <= max ? compact : `${compact.slice(0, max - 1)}…`;
@@ -1118,6 +1193,7 @@ export function createPoller(deps: PollerDeps) {
       {
         source: t.source,
         contractId: t.contractId,
+        version: normalizeContractVersion(t.version),
         cursor: null,
         lastEventLedger: null,
         rewindFromLedger: null,
@@ -1541,7 +1617,8 @@ export function createPoller(deps: PollerDeps) {
         );
         // Event name and reason come from remote contract data: bound them so
         // they cannot produce unbounded log output.
-        console.log(
+        Logger.info(
+          "poller",
           `[poller] skipped ${event.source} event "${boundedLabel(event.payload.eventName, 80)}" ` +
             `at ledger ${event.ledger}` +
             (event.payload.reason ? ` (${boundedLabel(event.payload.reason, 160)})` : "") +
@@ -1652,7 +1729,8 @@ export function createPoller(deps: PollerDeps) {
               `cap is ${config.maxNotificationsPerCycle} per cycle`,
           }),
         );
-        console.warn(
+        Logger.warn(
+          "poller",
           `[poller] cycle notification cap (${config.maxNotificationsPerCycle}) reached; ` +
             `dropping ${event.payload.name} at ledger ${event.ledger} correlation=${correlationId}`,
           {
@@ -2325,10 +2403,10 @@ export function createPoller(deps: PollerDeps) {
         await saveCursors("migration");
       }
       status.running = true;
-      status.startedAt = nowFn();
       status.startedAt = now();
       status.targets = [...state.values()].map((t) => ({ ...t }));
-      console.log(
+      Logger.info(
+        "poller",
         `[poller] watching market=${config.marketContractId} (${config.marketContractVersion}) ` +
           `squad=${config.squadContractId} (${config.squadContractVersion}) ` +
           `every ${config.pollIntervalMs}ms`,
@@ -2463,9 +2541,11 @@ export function createPoller(deps: PollerDeps) {
     },
 
     status(): PollerStatus {
+      refreshDeadLetterStatus();
       return {
         ...status,
         ledgerCache: ledgerCache.stats(),
+        suppressedLogs: errorSampler.suppressedTotal(),
         targets: [...state.values()].map((t) => ({ ...t })),
       };
     },

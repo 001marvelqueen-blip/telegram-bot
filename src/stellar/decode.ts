@@ -979,7 +979,7 @@ function contractIdOf(event: rpc.Api.EventResponse): string {
  * `unknown` payload with the reason attached. A notifier must not die on an
  * event it was not taught. Malformed metadata falls back to safe defaults
  * (`ledger` 0, indexes `null`, `at` 0) rather than `NaN`, so a poisoned field
- * can neither crash the scanner nor corrupt ordering math.https://github.com/mimir-stellar/telegram-bot/pull/293/conflict?name=tests%252Fdecode.test.mjs&base_oid=55b8808df9ce0cfa2b84e1e3cbbf204ca4293a88&head_oid=a8705ac539d943525daada6f2fb399b79c5a105a
+ * can neither crash the scanner nor corrupt ordering math.
  */
 export function decodeEvent(
   source: ContractSource,

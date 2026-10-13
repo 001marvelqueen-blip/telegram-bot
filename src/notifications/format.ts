@@ -425,10 +425,28 @@ function headline(event: DecodedEvent): string | null {
 }
 
 /** The full message, or null when the event is not worth notifying. */
+/**
+ * True unless NOTIFY_CATEGORIES is set and this is a `claim_created` event whose
+ * category is not on the allowlist. Every other notification type always passes.
+ */
+export function eventAllowedByCategory(
+  config: { notificationCategories?: readonly string[] },
+  event: DecodedEvent,
+): boolean {
+  const categories = config.notificationCategories ?? [];
+  if (categories.length === 0 || event.payload.name !== "claim_created") return true;
+  const allowed = new Set(categories.map((category) => category.trim().toLowerCase()));
+  return allowed.has(String(event.payload.category ?? "").trim().toLowerCase());
+}
+
 export function formatEvent(
-  config: StellarConfig & { channelPreviewMode?: boolean },
+  config: StellarConfig & {
+    channelPreviewMode?: boolean;
+    notificationCategories?: readonly string[];
+  },
   event: DecodedEvent,
 ): string | null {
+  if (!eventAllowedByCategory(config, event)) return null;
   try {
     const head = headline(event);
     if (head === null) return null;
