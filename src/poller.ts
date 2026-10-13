@@ -254,8 +254,6 @@ export interface PollerStatus {
   /** Result of the startup persistent-volume probe, when reported. */
   persistentVolumeAvailable?: boolean;
   persistentVolumeError?: string | null;
-  /** Explicit backoff (e.g. RPC Retry-After) currently applied, when known. */
-  currentBackoffMs?: number;
   targets: TargetState[];
   /** SHA-256 digest of the SBOM generated for this deployment image. */
   sbomDigest: string | null;

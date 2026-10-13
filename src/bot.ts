@@ -7,14 +7,13 @@
  * state. All chain logic lives in `src/poller.ts` and `src/stellar/`.
  */
 
-import type { UserFromGetMe } from "grammy/types";
-import { Bot, type Context } from "grammy";
 import { Bot, type Context, type CommandContext } from "grammy";
 import type { UserFromGetMe } from "grammy/types";
 import { performance } from "node:perf_hooks";
 
 import {
   escapeMd,
+  formatLastEvent,
   splitTelegramMessage,
   previewMessage,
   safeErrorMessage,
@@ -26,6 +25,7 @@ import { formatProvenanceSummary, networkLabel, type BotConfig } from "./config.
 import { contractExplorerUrl } from "./stellar/client.js";
 import type { ContractSource } from "./stellar/decode.js";
 import { buildHealthReport, chainClockLabel } from "./health.js";
+import { renderLogExport, type LogCapture } from "./logger.js";
 import type { PollerPauseResult, PollerResumeResult, PollerStatus } from "./poller.js";
 import {
   AUDIT_REPORT_MAX_ENTRIES,
@@ -167,19 +167,9 @@ export function statusMessage(config: BotConfig, status: PollerStatus, nowMs: nu
     if (target.lastError) lines.push(`  last error: ${escapeMd(target.lastError)}`);
   }
 
-  if (status.consecutiveFailures > 0) {
-    const backoffSec = Math.round(status.currentBackoffMs / 1000);
-    lines.push(
-      "",
-      `⚠️ *${status.consecutiveFailures} consecutive failed cycle${status.consecutiveFailures === 1 ? "" : "s"}*` +
-        (backoffSec > 0 ? ` · back\\-off ${escapeMd(String(backoffSec))}s` : ""),
-    );
-  }
-
   if (status.lastError) {
     lines.push(
       "",
-      `Last error \\(${ago(status.lastError.at)}\\): ${escapeMd(clipError(status.lastError.message))}`,
       `Last error \\(${ago(status.lastError.at, nowMs)}\\): ${escapeMd(status.lastError.message)}`,
     );
   }
@@ -206,16 +196,16 @@ export function lastEventMessage(config: BotConfig, status: PollerStatus): strin
   const lines = [`*Last observed events* — Stellar ${networkLabel(config)}`, ""];
 
   for (const target of status.targets) {
-    lines.push(`*mimir\-${target.source}*`);
-    if (target.lastEvent === null) {
-      lines.push("No event has been observed since this process started\.", "");
+    lines.push(`*mimir\\-${target.source}*`);
+    if (!target.lastEvent) {
+      lines.push("No event has been observed since this process started\\.", "");
       continue;
     }
     lines.push(formatLastEvent(config, target.lastEvent), "");
   }
 
   if (status.targets.length === 0) {
-    lines.push("No contract scan has completed yet\.");
+    lines.push("No contract scan has completed yet\\.");
   }
   return lines.join("\n").trimEnd();
 }
@@ -379,11 +369,8 @@ export interface BotDeps {
    * getMe() call so `bot.handleUpdate()` works without a real Telegram token.
    */
   botInfo?: UserFromGetMe;
-}
-
-function isOperator(ctx: Context, config: BotConfig): boolean {
-  const operatorId = config.operatorTelegramUserId;
-  return operatorId !== null && ctx.from?.id.toString() === operatorId;
+  /** Bounded redacted log ring backing /export. Absent = command disabled. */
+  logs?: LogCapture | undefined;
 }
 
 /**
@@ -427,7 +414,7 @@ async function replyMarkdown(
 
 /** Register command handlers on a grammy-compatible bot (also useful in tests). */
 export function registerCommandHandlers(
-  bot: Bot | { command: (name: string, handler: (ctx: Context) => Promise<void>) => void },
+  bot: Bot | { command: (name: string, handler: (ctx: CommandContext<Context>) => Promise<void>) => void },
   deps: BotDeps,
 ): void {
   const { config, status } = deps;
@@ -539,38 +526,20 @@ export function registerCommandHandlers(
   }
 }
 
-/** Placeholder for callback query handlers. Additional functionality can be added here. */
-function registerCallbackHandlers(
-  bot: Bot | { on?: (event: string, handler: (ctx: Context) => Promise<void>) => void },
-  deps: BotDeps,
-): void {
-  // Currently no callback handlers implemented; callback queries are not used
-  // in the core notification flow. This function is kept as a hook for future
-  // enhancements like inline keyboard handling for commands.
-}
-
 export function createBot(deps: BotDeps): Bot {
   const bot = new Bot(
     deps.config.botToken,
     deps.botInfo !== undefined ? { botInfo: deps.botInfo } : undefined,
   );
   registerCommandHandlers(bot, deps);
-  registerCallbackHandlers(bot, deps);
+  const { config, status, logs } = deps;
 
   bot.command("export", async (ctx) => {
-    if (!logs || logs.capacity() === 0) {
-      await ctx.reply("Log export is disabled (LOG_BUFFER_LINES=0).");
+    // Same authorization model as /audit: recent logs are for the operator.
+    if (!isOperator(ctx, config)) {
+      console.warn(`[bot] ignored unauthorized /export on update ${ctx.update.update_id}`);
       return;
     }
-    // Plain text, no parse mode: the content is redacted but untrusted, and
-    // MarkdownV2 would make any escaping slip a parsing error instead of a
-    // cosmetic wart.
-    await ctx.reply(renderLogExport(config, status(), logs), {
-      link_preview_options: { is_disabled: true },
-    });
-  });
-
-  bot.command("export", async (ctx) => {
     if (!logs || logs.capacity() === 0) {
       await ctx.reply("Log export is disabled (LOG_BUFFER_LINES=0).");
       return;
@@ -670,12 +639,18 @@ function eventRefLabel(eventRef: SendExtra["eventRef"]): string {
  * unspecified one into a single call, so the MarkdownV2-to-plain-text
  * retry happens at most once per chunk, never in a loop.
  */
-export function createNotifier(bot: Bot, config: BotConfig) {  return async (text: string, source?: ContractSource, extra?: SendExtra): Promise<void> => {
+export function createNotifier(
+  bot: Pick<Bot, "api">,
+  config: Pick<BotConfig, "chatId" | "marketChatId" | "squadChatId" | "botToken"> &
+    Partial<Pick<BotConfig, "chatIds" | "linkPreviewMarket" | "linkPreviewSquad">>,
+) {
+  return async (text: string, source?: ContractSource, extra?: SendExtra): Promise<void> => {
+    const defaultChat = config.chatId ?? config.chatIds?.[0] ?? "";
     const chatId = source === "market"
-      ? config.marketChatId ?? config.chatId
+      ? config.marketChatId || defaultChat
       : source === "squad"
-        ? config.squadChatId ?? config.chatId
-        : config.chatId;
+        ? config.squadChatId || defaultChat
+        : defaultChat;
 
     // Select link preview settings based on the contract source.
     // Commands (where source is undefined) always use TELEGRAM_OPTIONS (disabled).
@@ -689,6 +664,25 @@ export function createNotifier(bot: Bot, config: BotConfig) {  return async (tex
       parse_mode: "MarkdownV2" as const,
       link_preview_options: { is_disabled: linkPreviewDisabled },
     };
+
+    // Oversized payloads go out as ordered chunks under Telegram's limit. The
+    // thread reply rides on the first chunk and the explorer button on the
+    // last, so the message reads exactly like the unsplit one.
+    const parts = splitTelegramMessage(text);
+    if (parts.length > 1) {
+      for (const [index, part] of parts.entries()) {
+        await bot.api.sendMessage(chatId, part, {
+          ...notificationOptions,
+          ...(index === parts.length - 1 && extra?.reply_markup
+            ? { reply_markup: extra.reply_markup }
+            : {}),
+          ...(index === 0 && extra?.replyToMessageId !== undefined
+            ? { reply_parameters: { chat_id: chatId, message_id: extra.replyToMessageId } }
+            : {}),
+        });
+      }
+      return;
+    }
 
     try {
       await bot.api.sendMessage(chatId, text, {
