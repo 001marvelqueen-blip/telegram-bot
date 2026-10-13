@@ -68,8 +68,11 @@ function explorerPart(value: string): string {
 
 /** Explorer link for a transaction hash, used in notification footers. */
 export function txExplorerUrl(config: StellarConfig, txHash: string): string {
+  // Callers that link events validate the full 64-hex shape themselves (see
+  // `eventExplorerUrl`); here only a bounded token that cannot break the URL
+  // path is accepted.
   const hash = txHash.trim();
-  if (!hash || !/^[a-fA-F0-9]{64}$/.test(hash)) return "";
+  if (!hash || !/^[A-Za-z0-9]{1,128}$/.test(hash)) return "";
   const network = explorerNetworkSegment(config);
   return `${explorerBase(config)}/${network}/tx/${explorerPart(hash)}`;
 }

@@ -2376,14 +2376,26 @@ export function createPoller(deps: PollerDeps) {
   return {
     async start(): Promise<void> {
       // Verify persistent volume availability before touching anything else.
+      // An unwritable volume is reported loudly (log, /health) but is not fatal:
+      // the in-memory cursor keeps notifying, exactly like an unwritable cursor
+      // file, and every cycle retries the write.
       const cursorDir = path.dirname(config.cursorFile);
       try {
         await mkdir(cursorDir, { recursive: true });
         const probeFile = path.join(cursorDir, `.volume-probe.${process.pid}.${Date.now()}`);
         await writeFile(probeFile, "", "utf8");
         await unlink(probeFile).catch(() => {});
+        status.persistentVolumeAvailable = true;
+        status.persistentVolumeError = null;
       } catch (err) {
-        throw new Error(`Persistent volume is not writable: ${errorMessage(err)}`);
+        status.persistentVolumeAvailable = false;
+        status.persistentVolumeError = errorMessage(err);
+        Logger.error(
+          "poller",
+          `[poller] Persistent volume is not writable at ${cursorDir}: ${errorMessage(err)}; ` +
+            `cursor state will not survive a restart until this is fixed`,
+          { action: "persistent_volume_unwritable", cursorDir, error: errorMessage(err) },
+        );
       }
 
       // Refuse a second live process before touching the cursor or Telegram.

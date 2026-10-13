@@ -628,7 +628,14 @@ function notificationCategoriesFrom(): readonly string[] {
 }
 
 function stellarFrom(c: ReturnType<typeof collector>): StellarConfig {
-  const network = c.network("STELLAR_NETWORK", DEFAULTS.network);
+  // An explicit STELLAR_NETWORK wins; otherwise an explicit passphrase names
+  // the network (beating a profile's default), so a passphrase-only deployment
+  // is not mislabelled testnet.
+  const passphraseOverride = read("STELLAR_NETWORK_PASSPHRASE");
+  const network =
+    read("STELLAR_NETWORK") !== undefined || passphraseOverride === undefined
+      ? c.network("STELLAR_NETWORK", DEFAULTS.network)
+      : inferNetwork(passphraseOverride);
   const namedDefaults = network !== "custom" ? {
     rpcUrl: NETWORK_RPC_URLS[network],
     horizonUrl: NETWORK_HORIZON_URLS[network],
@@ -771,7 +778,9 @@ export function networkLabel(config: StellarConfig): string {
     if (config.networkPassphrase === MOCK_NETWORK_PASSPHRASE) return "mock";
     return "custom";
   }
-  return net;
+  // Stellar's own name for its main network is "public" (stellar.expert, the
+  // passphrase itself); `mainnet` is only the STELLAR_NETWORK config spelling.
+  return net === "mainnet" ? "public" : net;
 }
 
 /** Derive a StellarNetwork from a passphrase when the field is absent (backward compat). */
