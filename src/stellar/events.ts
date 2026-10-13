@@ -368,7 +368,7 @@ export async function readContractEvents(
   const decoded: DecodedEvent[] = [];
   for (const event of rawEvents) {
     if (!event || typeof event !== "object") continue;
-    decoded.push(decodeEvent(target.source, event));
+    decoded.push(decodeEvent(target.source, event, target.version));
   }
 
   // Deterministic order from chain metadata (ledger → transaction index →
