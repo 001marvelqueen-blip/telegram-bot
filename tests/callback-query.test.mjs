@@ -98,8 +98,9 @@ const BOT_INFO = {
 };
 
 function harness(depsOverrides = {}) {
-  const config = fakeConfig(depsOverrides.config ?? {});
-  let currentStatus = fakeStatus(depsOverrides.statusData ?? {});
+  const { config: configOverrides, statusData, ...restOverrides } = depsOverrides;
+  const config = fakeConfig(configOverrides ?? {});
+  let currentStatus = fakeStatus(statusData ?? {});
   let pauseResult = "paused";
   let resumeResult = "resumed";
   let pauseCalls = 0;
@@ -116,7 +117,7 @@ function harness(depsOverrides = {}) {
       resumeCalls += 1;
       return resumeResult;
     },
-    ...depsOverrides,
+    ...restOverrides,
   };
 
   const bot = createBot(deps);

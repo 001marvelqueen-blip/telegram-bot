@@ -94,8 +94,8 @@ test("networkLabel: network=testnet returns 'testnet'", () => {
   assert.equal(networkLabel(makeConfig({ network: "testnet" })), "testnet");
 });
 
-test("networkLabel: network=mainnet returns 'public'", () => {
-  assert.equal(networkLabel(makeConfig({ network: "mainnet" })), "public");
+test("networkLabel: network=mainnet returns 'mainnet'", () => {
+  assert.equal(networkLabel(makeConfig({ network: "mainnet" })), "mainnet");
 });
 
 test("networkLabel: network=futurenet returns 'futurenet'", () => {
@@ -229,7 +229,7 @@ test("loadStellarConfig: STELLAR_NETWORK=mainnet sets mainnet defaults", () => {
       assert.equal(config.rpcUrl, NETWORK_RPC_URLS.mainnet);
       assert.equal(config.horizonUrl, NETWORK_HORIZON_URLS.mainnet);
       assert.equal(config.networkPassphrase, NETWORK_PASSPHRASES.mainnet);
-      assert.equal(networkLabel(config), "public");
+      assert.equal(networkLabel(config), "mainnet");
       assert.equal(explorerNetworkSegment(config), "public");
     },
   );

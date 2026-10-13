@@ -632,10 +632,11 @@ function stellarFrom(c: ReturnType<typeof collector>): StellarConfig {
   // the network (beating a profile's default), so a passphrase-only deployment
   // is not mislabelled testnet.
   const passphraseOverride = read("STELLAR_NETWORK_PASSPHRASE");
-  const network =
+  const namedNetwork =
     read("STELLAR_NETWORK") !== undefined || passphraseOverride === undefined
       ? c.network("STELLAR_NETWORK", DEFAULTS.network)
-      : inferNetwork(passphraseOverride);
+      : undefined;
+  const network = namedNetwork ?? inferNetwork(passphraseOverride ?? "");
   const namedDefaults = network !== "custom" ? {
     rpcUrl: NETWORK_RPC_URLS[network],
     horizonUrl: NETWORK_HORIZON_URLS[network],
@@ -647,7 +648,8 @@ function stellarFrom(c: ReturnType<typeof collector>): StellarConfig {
   };
 
   return {
-    network,
+    // Left unset when only a passphrase was given, so labels infer from it.
+    ...(namedNetwork !== undefined ? { network: namedNetwork } : {}),
     marketContractId: c.contractId("MARKET_CONTRACT_ID"),
     squadContractId: c.contractId("SQUAD_CONTRACT_ID"),
     marketContractVersion: c.contractVersion("MARKET_CONTRACT_VERSION", "v1"),
@@ -773,13 +775,15 @@ export function loadConfig(): BotConfig {
 
 /** Display label for the active Stellar network. */
 export function networkLabel(config: StellarConfig): string {
-  const net = config.network ?? inferNetwork(config.networkPassphrase);
+  // A named STELLAR_NETWORK is reported by the name the operator chose.
+  if (config.network !== undefined && config.network !== "custom") return config.network;
+  const net = inferNetwork(config.networkPassphrase);
   if (net === "custom") {
     if (config.networkPassphrase === MOCK_NETWORK_PASSPHRASE) return "mock";
     return "custom";
   }
-  // Stellar's own name for its main network is "public" (stellar.expert, the
-  // passphrase itself); `mainnet` is only the STELLAR_NETWORK config spelling.
+  // Inferred from the passphrase alone: Stellar's own name for its main
+  // network is "public" (the passphrase itself, stellar.expert).
   return net === "mainnet" ? "public" : net;
 }
 

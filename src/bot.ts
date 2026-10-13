@@ -7,7 +7,7 @@
  * state. All chain logic lives in `src/poller.ts` and `src/stellar/`.
  */
 
-import { Bot, type Context, type CommandContext } from "grammy";
+import { Bot, InlineKeyboard, type Context, type CommandContext } from "grammy";
 import type { UserFromGetMe } from "grammy/types";
 import { performance } from "node:perf_hooks";
 
@@ -78,6 +78,164 @@ export const TELEGRAM_OPTIONS = {
   parse_mode: "MarkdownV2" as const,
   link_preview_options: { is_disabled: true },
 };
+
+// ── Inline keyboard callbacks ────────────────────────────────────────────────
+// Callback data is untrusted user input: it is validated before any action
+// runs, and operator actions are authorized exactly like /pause and /resume.
+
+export type CallbackActionType = "status" | "contracts" | "help" | "pause" | "resume";
+
+export interface ValidCallbackAction {
+  type: CallbackActionType;
+  raw: string;
+}
+
+export type CallbackValidationResult =
+  | { ok: true; action: ValidCallbackAction }
+  | { ok: false; reason: string; fallbackText: string };
+
+/** Telegram's Bot API limits callback_data to 1-64 bytes. */
+export const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
+
+export const CALLBACK_FALLBACK_PAYLOAD =
+  "*Invalid request*\nThe requested action is unrecognized or malformed\\.";
+
+export const CALLBACK_UNAUTHORIZED_PAYLOAD =
+  "*Unauthorized*\nThis action requires operator privileges\\.";
+
+export const CALLBACK_FALLBACK_FEEDBACK = "Invalid or unrecognized action";
+export const CALLBACK_UNAUTHORIZED_FEEDBACK = "Unauthorized: operator only";
+
+
+function isKnownAction(val: string): val is CallbackActionType {
+  return ["status", "contracts", "help", "pause", "resume"].includes(val);
+}
+
+/**
+ * Validate untrusted callback-query data before any action is executed.
+ * Treats all callback data as untrusted external user input.
+ */
+export function validateCallbackData(raw: unknown): CallbackValidationResult {
+  if (typeof raw !== "string") {
+    return {
+      ok: false,
+      reason: "missing-or-non-string",
+      fallbackText: CALLBACK_FALLBACK_FEEDBACK,
+    };
+  }
+
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return {
+      ok: false,
+      reason: "empty",
+      fallbackText: CALLBACK_FALLBACK_FEEDBACK,
+    };
+  }
+
+  const byteLength = Buffer.byteLength(raw, "utf8");
+  if (byteLength > TELEGRAM_CALLBACK_DATA_MAX_BYTES) {
+    return {
+      ok: false,
+      reason: "exceeds-max-length",
+      fallbackText: CALLBACK_FALLBACK_FEEDBACK,
+    };
+  }
+
+  // Reject ASCII control characters (including null bytes)
+  if (/[\x00-\x1F\x7F]/.test(raw)) {
+    return {
+      ok: false,
+      reason: "control-characters",
+      fallbackText: CALLBACK_FALLBACK_FEEDBACK,
+    };
+  }
+
+  // 1. JSON payload: e.g. {"action":"status"}
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    try {
+      const parsed = JSON.parse(trimmed) as { action?: unknown };
+      if (typeof parsed?.action === "string" && isKnownAction(parsed.action)) {
+        return {
+          ok: true,
+          action: { type: parsed.action, raw },
+        };
+      }
+      return {
+        ok: false,
+        reason: "unknown-json-action",
+        fallbackText: CALLBACK_FALLBACK_FEEDBACK,
+      };
+    } catch {
+      return {
+        ok: false,
+        reason: "malformed-json",
+        fallbackText: CALLBACK_FALLBACK_FEEDBACK,
+      };
+    }
+  }
+
+  // 2. Colon-delimited: e.g. "status:refresh", "mimir:contracts", etc.
+  if (trimmed.includes(":")) {
+    const parts = trimmed.split(":");
+    if (parts[0] === "mimir" && parts[1] && isKnownAction(parts[1])) {
+      return {
+        ok: true,
+        action: { type: parts[1], raw },
+      };
+    }
+    if (parts[0] && isKnownAction(parts[0])) {
+      return {
+        ok: true,
+        action: { type: parts[0], raw },
+      };
+    }
+    return {
+      ok: false,
+      reason: "unknown-action",
+      fallbackText: CALLBACK_FALLBACK_FEEDBACK,
+    };
+  }
+
+  // 3. Direct action token: "status", "contracts", "help", "pause", "resume"
+  if (isKnownAction(trimmed)) {
+    return {
+      ok: true,
+      action: { type: trimmed, raw },
+    };
+  }
+
+  return {
+    ok: false,
+    reason: "unknown-action",
+    fallbackText: CALLBACK_FALLBACK_FEEDBACK,
+  };
+}
+
+export function statusKeyboard(config?: BotConfig): InlineKeyboard {
+  const keyboard = new InlineKeyboard()
+    .text("🔄 Refresh", "status")
+    .text("📋 Contracts", "contracts");
+  if (config?.operatorTelegramUserId) {
+    keyboard.row().text("⏸ Pause", "pause").text("▶ Resume", "resume");
+  }
+  return keyboard;
+}
+
+export function contractsKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("📊 Status", "status")
+    .text("❓ Help", "help");
+}
+
+export function operatorKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("⏸ Pause", "pause")
+    .text("▶ Resume", "resume")
+    .row()
+    .text("📊 Status", "status");
+}
+
 
 function ago(timestamp: number | null, nowMs: number = Date.now()): string {
   if (timestamp === null) return "never";
@@ -388,7 +546,7 @@ function isChatAllowed(allowedChatIds: string[], chatId: number): boolean {
   return allowedChatIds.some((allowed) => allowed === asString);
 }
 
-function isOperator(ctx: Context, config: BotConfig): boolean {
+export function isOperator(ctx: Pick<Context, "from">, config: BotConfig): boolean {
   const operatorId = config.operatorTelegramUserId;
   return operatorId !== null && ctx.from?.id.toString() === operatorId;
 }
@@ -526,12 +684,194 @@ export function registerCommandHandlers(
   }
 }
 
+function isMessageNotModified(err: unknown): boolean {
+  if (!err) return false;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /message is not modified/i.test(msg);
+}
+
+export async function safeAnswerCallback(
+  ctx: Context,
+  config: BotConfig,
+  params: { text?: string; show_alert?: boolean } = {},
+): Promise<void> {
+  if (ctx.callbackQuery?.id) {
+    try {
+      await ctx.answerCallbackQuery(params);
+    } catch (err) {
+      console.warn(
+        `[bot] answerCallbackQuery failed: ${safeErrorMessage(err, [config.botToken])}`,
+      );
+    }
+  }
+}
+
+export async function updateOrReplyMessage(
+  ctx: Context,
+  text: string,
+  replyMarkup?: InlineKeyboard,
+): Promise<void> {
+  const options = {
+    ...TELEGRAM_OPTIONS,
+    ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+  };
+
+  if (ctx.callbackQuery?.message) {
+    try {
+      await ctx.editMessageText(text, options);
+      return;
+    } catch (err) {
+      if (isMessageNotModified(err)) {
+        return;
+      }
+      // If edit failed (e.g. message too old or deleted), fall through to reply
+    }
+  }
+
+  if (ctx.chat) {
+    await ctx.reply(text, options);
+    return;
+  }
+
+  // no-op: callers that need to target the configured chat should call
+  // `ctx.api.sendMessage(config.chatId, ...)` directly when `ctx.chat` is
+  // unavailable. handleCallbackQuery does this.
+}
+
+export async function handleCallbackQuery(
+  ctx: Context,
+  deps: BotDeps,
+): Promise<void> {
+  const { config, status } = deps;
+  const pause = deps.pause ?? (() => "stopped");
+  const resume = deps.resume ?? (() => "stopped");
+  const rawData = ctx.callbackQuery?.data;
+
+  // Validate callback query data before acting
+  const validation = validateCallbackData(rawData);
+
+  if (!validation.ok) {
+    console.warn(
+      `[bot] rejected invalid callback query (${validation.reason}) on update ${ctx.update.update_id}`,
+    );
+    await safeAnswerCallback(ctx, config, {
+      text: validation.fallbackText,
+      show_alert: false,
+    });
+    return;
+  }
+
+  const { action } = validation;
+
+  // Enforce operator role authorization
+  if (action.type === "pause" || action.type === "resume") {
+    if (!isOperator(ctx, config)) {
+      console.warn(
+        `[bot] ignored unauthorized callback /${action.type} on update ${ctx.update.update_id}`,
+      );
+      await safeAnswerCallback(ctx, config, {
+        text: CALLBACK_UNAUTHORIZED_FEEDBACK,
+        show_alert: true,
+      });
+      return;
+    }
+  }
+
+  // Execute validated action
+  try {
+    switch (action.type) {
+      case "status": {
+        const text = statusMessage(config, status());
+        if (ctx.callbackQuery?.message) {
+          await updateOrReplyMessage(ctx, text, statusKeyboard(config));
+        } else {
+          await ctx.api.sendMessage(config.chatId, text, {
+            ...TELEGRAM_OPTIONS,
+            reply_markup: statusKeyboard(config),
+          });
+        }
+        await safeAnswerCallback(ctx, config, { text: "Status refreshed" });
+        break;
+      }
+
+      case "contracts": {
+        const text = contractsMessage(config);
+        if (ctx.callbackQuery?.message) {
+          await updateOrReplyMessage(ctx, text, contractsKeyboard());
+        } else {
+          await ctx.api.sendMessage(config.chatId, text, TELEGRAM_OPTIONS);
+        }
+        await safeAnswerCallback(ctx, config, { text: "Contracts" });
+        break;
+      }
+
+      case "help": {
+        const text = helpMessage(config);
+        if (ctx.callbackQuery?.message) {
+          await updateOrReplyMessage(ctx, text);
+        } else {
+          await ctx.api.sendMessage(config.chatId, text, TELEGRAM_OPTIONS);
+        }
+        await safeAnswerCallback(ctx, config, { text: "Help" });
+        break;
+      }
+
+      case "pause": {
+        const result = pause();
+        const text = pauseMessage(result);
+        if (ctx.callbackQuery?.message) {
+          await updateOrReplyMessage(ctx, text, operatorKeyboard());
+        } else {
+          await ctx.api.sendMessage(config.chatId, text, TELEGRAM_OPTIONS);
+        }
+        await safeAnswerCallback(ctx, config, {
+          text: result === "paused" ? "Polling paused" : result === "already-paused" ? "Already paused" : "Cannot pause",
+        });
+        break;
+      }
+
+      case "resume": {
+        const result = resume();
+        const text = resumeMessage(result);
+        if (ctx.callbackQuery?.message) {
+          await updateOrReplyMessage(ctx, text, operatorKeyboard());
+        } else {
+          await ctx.api.sendMessage(config.chatId, text, TELEGRAM_OPTIONS);
+        }
+        await safeAnswerCallback(ctx, config, {
+          text: result === "resumed" ? "Polling resumed" : result === "already-running" ? "Already running" : "Cannot resume",
+        });
+        break;
+      }
+    }
+  } catch (err) {
+    console.error(
+      `[bot] callback error on action ${action.type}: ${safeErrorMessage(err, [config.botToken])}`,
+    );
+    await safeAnswerCallback(ctx, config, { text: "Action failed" });
+  }
+}
+
+/** Register callback handlers on a grammy-compatible bot or mock. */
+export function registerCallbackHandlers(
+  bot: Bot | { on: (event: string, handler: (ctx: Context) => Promise<void>) => void },
+  deps: BotDeps,
+): void {
+  (bot as { on: (event: string, handler: (ctx: Context) => Promise<void>) => void }).on(
+    "callback_query",
+    async (ctx: Context) => {
+      await handleCallbackQuery(ctx, deps);
+    },
+  );
+}
+
 export function createBot(deps: BotDeps): Bot {
   const bot = new Bot(
     deps.config.botToken,
     deps.botInfo !== undefined ? { botInfo: deps.botInfo } : undefined,
   );
   registerCommandHandlers(bot, deps);
+  registerCallbackHandlers(bot, deps);
   const { config, status, logs } = deps;
 
   bot.command("export", async (ctx) => {
