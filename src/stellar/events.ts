@@ -59,6 +59,7 @@ import {
   isAdminPayload,
   shortAddress,
   sortEvents,
+  normalizeContractVersion,
   summarizePayloadForLog,
   type ContractSource,
   type DecodedEvent,
@@ -115,6 +116,8 @@ export interface RawScan {
   /** True when `maxPages` stopped the walk before the tip. */
   truncated: boolean;
   pages: number;
+  /** Pages the RPC returned with zero events (the Soroban norm on a quiet chain). */
+  emptyPages: number;
   /** Events dropped because an earlier page or cycle already returned them. */
   duplicates: number;
   /**
@@ -165,7 +168,7 @@ export function eventCursorLedger(cursor: string): number | null {
   try {
     const toid = BigInt(toidText);
     const index = BigInt(indexText);
-    if (toid > 18_446_744_073_709_551_615n || index > 4_294_967_295n) return null;
+    if (toid > MAX_UINT64 || index > MAX_UINT32) return null;
     return Number(toid >> 32n);
   } catch {
     return null;
@@ -380,13 +383,14 @@ export async function readContractEvents(
   return {
     source: target.source,
     contractId: target.contractId,
-    version,
+    version: normalizeContractVersion(target.version),
     events,
     cursor: scan.cursor,
     latestLedger: scan.latestLedger,
     oldestLedger: scan.oldestLedger,
     truncated: scan.truncated,
     pages: scan.pages,
+    emptyPages: scan.emptyPages,
     duplicates: scan.duplicates,
     seenEventIds: scan.seenEventIds,
     startLedger: scan.startLedger,
@@ -619,7 +623,7 @@ function summarize(event: DecodedEvent): string {
   };
   switch (p.name) {
     case "claim_created":
-      return `claim #${p.claimId} created by ${shortAddress(p.creator)} [${p.category}]`;
+      return `claim #${p.claimId} created by ${shortAddress(p.creator)} [${text(p.category, 80)}]`;
     case "claim_challenged":
       return `claim #${p.claimId} challenged by ${shortAddress(p.challenger)} for ${money(p.stake)}`;
     case "claim_resolved":
@@ -629,7 +633,7 @@ function summarize(event: DecodedEvent): string {
     case "challenger_paid":
       return `claim #${p.claimId} paid ${shortAddress(p.challenger)} net=${money(p.net)}`;
     case "market_created":
-      return `squad market #${p.marketId} by ${shortAddress(p.captain)}: ${p.question}`;
+      return `squad market #${p.marketId} by ${shortAddress(p.captain)}: ${text(p.question)}`;
     case "deposited":
       return `squad #${p.marketId} side=${p.side} ${shortAddress(p.participant)} deposited ${money(p.amount)}`;
     case "resolved":
@@ -647,19 +651,11 @@ function summarize(event: DecodedEvent): string {
     case "admin":
       return `admin event ${p.action}`;
     case "unknown":
-      return `unknown "${p.eventName}"${p.reason ? ` (${p.reason})` : ""}`;
+      return `unknown "${text(p.eventName, 80)}"${p.reason ? ` (${text(p.reason)})` : ""}`;
     default:
       if (isAdminPayload(p)) return `admin event ${p.name}`;
       return p.name;
   }
-}
-
-function boundedJson(value: unknown): string {
-  return JSON.stringify(value, (_key, item) => {
-    if (typeof item !== "string") return typeof item === "bigint" ? item.toString() : item;
-    const compact = item.replace(/\s+/g, " ").trim();
-    return compact.length <= 240 ? compact : `${compact.slice(0, 239)}…`;
-  });
 }
 
 async function main(): Promise<void> {
