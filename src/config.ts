@@ -51,6 +51,31 @@ import {
   parseNotificationFeatureFlags,
   type NotificationFeatureFlags,
 } from "./notifications/featureFlags.js";
+
+/** Named Stellar networks the bot understands. `custom` is any other passphrase. */
+export type StellarNetwork = "testnet" | "mainnet" | "futurenet" | "custom";
+
+/** Well-known passphrase for each named network. */
+export const NETWORK_PASSPHRASES: Record<Exclude<StellarNetwork, "custom">, string> = {
+  testnet: "Test SDF Network ; September 2015",
+  mainnet: "Public Global Stellar Network ; September 2015",
+  futurenet: "Test SDF Future Network ; October 2022",
+};
+
+/** Well-known RPC URLs for each named network. */
+export const NETWORK_RPC_URLS: Record<Exclude<StellarNetwork, "custom">, string> = {
+  testnet: "https://soroban-testnet.stellar.org",
+  mainnet: "https://mainnet.sorobanrpc.com",
+  futurenet: "https://rpc-futurenet.stellar.org",
+};
+
+/** Well-known Horizon URLs for each named network. */
+export const NETWORK_HORIZON_URLS: Record<Exclude<StellarNetwork, "custom">, string> = {
+  testnet: "https://horizon-testnet.stellar.org",
+  mainnet: "https://horizon.stellar.org",
+  futurenet: "https://horizon-futurenet.stellar.org",
+};
+
 /**
  * The environment as it was before the `.env` file was merged in.
  *

@@ -16,28 +16,6 @@ import { rpc } from "@stellar/stellar-sdk";
 
 import type { StellarConfig } from "../config.js";
 
-/** Soroban contract strkey: `C` + 55 base32 characters. */
-const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
-
-/**
- * Validate that a contract ID is a well-formed Soroban strkey.
- * Returns true if valid; throws an error with a descriptive message if not.
- * Kept as a runtime check so the poller can catch misconfigurations early
- * before a scan attempt and log actionable diagnostics.
- */
-export function validateContractId(contractId: string, fieldName: string = "contract ID"): boolean {
-  const trimmed = contractId.trim();
-  if (trimmed === "") {
-    throw new Error(`${fieldName} is empty`);
-  }
-  if (!CONTRACT_ID_PATTERN.test(trimmed)) {
-    throw new Error(
-      `${fieldName} is not a valid Soroban contract ID (expected C… strkey, 56 chars); got "${trimmed}"`,
-    );
-  }
-  return true;
-}
-
 export class RpcPassphraseError extends Error {
   constructor(expected: string, actual: string) {
     super(
@@ -49,27 +27,15 @@ export class RpcPassphraseError extends Error {
 }
 
 /**
- * Create an RPC server and verify its network passphrase matches the configured value.
- * This fail-fast check at boot prevents silent misconfigurations where the bot reads
- * events from the wrong network.
- *
- * Throws RpcPassphraseError if the passphrase does not match.
+ * Create an RPC server. Construction is offline; the network passphrase is
+ * verified separately at boot by {@link validateNetworkPassphrase}.
  */
-export async function createRpcServer(config: StellarConfig): Promise<rpc.Server> {
-  const server = new rpc.Server(config.rpcUrl, {
+export function createRpcServer(config: StellarConfig): rpc.Server {
+  return new rpc.Server(config.rpcUrl, {
     // Only relevant for a local quickstart container on plain http.
     allowHttp: new URL(config.rpcUrl).protocol === "http:",
     timeout: 15000,
   });
-
-  // Verify the RPC's passphrase matches the configured one. This is a fail-fast
-  // check that prevents configuration errors from silently producing wrong results.
-  const network = await server.getNetwork();
-  if (network.passphrase !== config.networkPassphrase) {
-    throw new RpcPassphraseError(config.networkPassphrase, network.passphrase);
-  }
-
-  return server;
 }
 
 /** Default stellar.expert origin; override with STELLAR_EXPLORER_BASE_URL. */
@@ -169,6 +135,56 @@ export class NetworkPassphraseMismatchError extends Error {
     super(message);
     this.name = "NetworkPassphraseMismatchError";
     this.problem = problem;
+  }
+}
+
+/** Render a remote error without echoing an unbounded payload. */
+function boundedRemoteError(err: unknown): string {
+  const msg =
+    err instanceof Error
+      ? err.message
+      : typeof err === "string"
+        ? err
+        : String(err || "unknown error");
+  const bounded = msg.replace(/\s+/g, " ").trim();
+  return bounded.length <= 100 ? bounded : `${bounded.slice(0, 99)}…`;
+}
+
+/**
+ * Verify that the RPC reports the configured network passphrase. Fails fast at
+ * boot so the notifier never reads events from the wrong network. The error
+ * never contains either passphrase, only their lengths.
+ *
+ * @param server The Soroban RPC server (from {@link createRpcServer})
+ */
+export async function validateNetworkPassphrase(
+  server: Pick<rpc.Server, "getNetwork">,
+  config: Pick<StellarConfig, "networkPassphrase">,
+): Promise<void> {
+  let network: unknown;
+  try {
+    network = await server.getNetwork();
+  } catch (err) {
+    throw new NetworkPassphraseMismatchError(
+      "missing",
+      `getNetwork failed: ${boundedRemoteError(err)}`,
+    );
+  }
+
+  const rpcPassphrase = (network as Record<string, unknown> | null)?.passphrase;
+  if (typeof rpcPassphrase !== "string") {
+    throw new NetworkPassphraseMismatchError(
+      "malformed",
+      `RPC getNetwork returned a malformed passphrase (expected a string; got ${typeof rpcPassphrase})`,
+    );
+  }
+
+  if (rpcPassphrase !== config.networkPassphrase) {
+    throw new NetworkPassphraseMismatchError(
+      "mismatch",
+      `RPC network passphrase does not match the configured value ` +
+        `(configured=${config.networkPassphrase.length} chars, received=${rpcPassphrase.length} chars)`,
+    );
   }
 }
 
@@ -352,12 +368,8 @@ export function clampStartLedger(
 export function generateSyntheticEventFixture(
   config: StellarConfig,
   txHash: string = "mock-tx-hash-1234567890abcdef"
-): rpc.GetEventsResponse {
-  const network =
-    config.networkPassphrase === "Public Global Stellar Network ; September 2015"
-      ? "public"
-      : "testnet";
-
+): rpc.Api.RawGetEventsResponse {
+  void config;
   return {
     events: [
       {
@@ -366,13 +378,18 @@ export function generateSyntheticEventFixture(
         id: "1234567890",
         ledger: 12345678,
         ledgerClosedAt: new Date().toISOString(),
-        inSuccessfulContractEvent: true,
-        contractEventType: "log",
+        transactionIndex: 0,
+        operationIndex: 0,
+        inSuccessfulContractCall: true,
         topic: ["bG9nIGV2ZW50"], // Base64 encoded "log event"
-        data: "SGVsbG8gV29ybGQ=", // Base64 encoded "Hello World"
+        value: "SGVsbG8gV29ybGQ=", // Base64 encoded "Hello World"
         txHash: txHash,
       },
     ],
+    cursor: "",
     latestLedger: 12345678,
+    oldestLedger: 12345678,
+    latestLedgerCloseTime: "0",
+    oldestLedgerCloseTime: "0",
   };
 }
