@@ -265,6 +265,10 @@ export interface BotConfig extends StellarConfig {
   logSampleMaxPerWindow: number;
   /** Sampling window for repetitive error logs, in milliseconds. */
   logSampleWindowMs: number;
+  /** Recent console lines kept (redacted) for /export. `0` disables capture. */
+  logBufferLines: number;
+  /** Optional public URL to run the bot in webhook mode instead of long-polling. */
+  telegramWebhookUrl: string | null;
 }
 
 /** Fallback drain budget when a config object predates `SHUTDOWN_TIMEOUT_MS`. */
@@ -327,6 +331,7 @@ const DEFAULTS = {
   // summary. Long enough not to hide a flapping error, short enough to bound
   // an outage that lasts for hours.
   logSampleWindowMs: 300_000,
+  logBufferLines: 500,
 } as const;
 
 /**
@@ -749,6 +754,8 @@ export function loadConfig(): BotConfig {
     ),
     // A window of 1ms is legal but pointless; 1s is the smallest useful unit.
     logSampleWindowMs: c.int("LOG_SAMPLE_WINDOW_MS", DEFAULTS.logSampleWindowMs, 1_000),
+    logBufferLines: c.int("LOG_BUFFER_LINES", DEFAULTS.logBufferLines, 0),
+    telegramWebhookUrl: c.optionalUrl("TELEGRAM_WEBHOOK_URL"),
   };
 
   if (c.problems.length > 0) throw new ConfigError(c.problems);
