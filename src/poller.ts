@@ -148,6 +148,10 @@ export interface TargetState {
   consecutiveFailures: number;
   /** Timestamp (unix ms) before which this target will skip RPC scanning. */
   nextEligibleAt: number | null;
+  /** Bounded description of this target's most recent send timeout, when tracked. */
+  lastSendTimeout?: string | null;
+  /** Newest event observed for this target since start, for `/last-event`. */
+  lastEvent?: DecodedEvent | null;
 }
 
 /**
@@ -2210,6 +2214,9 @@ export function createPoller(deps: PollerDeps) {
               );
             }
           }
+
+          const newest = scan.events[scan.events.length - 1];
+          if (newest !== undefined) current.lastEvent = newest;
 
           trackCursorAdvance(current, previousCursor, scan.latestLedger);
         } catch (err) {

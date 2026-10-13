@@ -89,7 +89,7 @@ export function createDrillConfig(cursorFile: string, overrides: Partial<BotConf
     healthPort: 0,
     healthStaleMs: 90_000,
     ...overrides,
-  };
+  } as BotConfig;
 }
 
 export interface MockEventOptions {
