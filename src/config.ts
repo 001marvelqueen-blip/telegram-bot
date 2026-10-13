@@ -469,6 +469,8 @@ function collector(profile: Record<string, string>) {
         return null;
       }
       return parsed;
+    },
+
     optionalChatId(name: string, fallback: string): string {
       const value = read(name) ?? fallback;
       if (value === "") return value;

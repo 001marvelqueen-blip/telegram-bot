@@ -200,11 +200,10 @@ function who(address: string): string {
  *
  * The category, question, and summary fields all come from remote contract
  * state. A hard cap here means a crafted payload cannot push an unbounded
- * string through to a Telegram message or to a log line.
+ * string through to a Telegram message or to a log line. Never splits a
+ * Unicode code point.
  */
-export function clip(text: string, max = 200): string {
-/** Truncate an unbounded contract String without splitting a Unicode code point. */
-function clip(text: string, max = MAX_EVENT_FIELD_LENGTH): string {
+export function clip(text: string, max = MAX_EVENT_FIELD_LENGTH): string {
   const trimmed = text.trim();
   const characters = Array.from(trimmed);
   return characters.length <= max ? trimmed : `${characters.slice(0, max - 1).join("")}…`;
