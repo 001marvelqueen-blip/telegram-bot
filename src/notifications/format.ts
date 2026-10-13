@@ -281,16 +281,17 @@ export function formatLastEvent(config: StellarConfig, event: DecodedEvent): str
   );
 }
 
-/** Format the latest observed event, including events with no notification template. */
-export function formatLastEvent(config: StellarConfig, event: DecodedEvent): string {
-  const notification = formatEvent(config, event);
-  if (notification !== null) return notification;
-
-  const name = event.payload.name === "unknown" ? event.payload.eventName : event.payload.name;
-  return (
-    `*Last observed event* — \`${escapeMd(clip(name, 120))}\`\n` +
-    `This event has no notification summary\.\n${footer(config, event)}`
-  );
+/**
+ * One MarkdownV2 message summarising a burst of events: a header with the count
+ * and one bounded line per event. Returns null when there is nothing to send.
+ */
+export function formatDigest(events: readonly DecodedEvent[]): string | null {
+  if (events.length === 0) return null;
+  const lines = events.map((event) => {
+    const name = event.payload.name === "unknown" ? event.payload.eventName : event.payload.name;
+    return `· mimir\\-${escapeMd(event.source)} \`${escapeMd(clip(name, 80))}\` at ledger ${event.ledger}`;
+  });
+  return [`*Mimir Digest* — ${events.length} events in this cycle`, "", ...lines].join("\n");
 }
 
 /**
@@ -659,6 +660,7 @@ export function previewMessage(config: StellarConfig & { linkPreviewMarket?: boo
     const sampleEvent: DecodedEvent = {
       source: "squad",
       contractId: config.squadContractId,
+      version: "v1",
       ledger: 1000000,
       txHash: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
       at: Math.floor(Date.now() / 1000),
@@ -683,6 +685,7 @@ export function previewMessage(config: StellarConfig & { linkPreviewMarket?: boo
   const sampleEvent: DecodedEvent = {
     source: "market",
     contractId: config.marketContractId,
+    version: "v1",
     ledger: 1000000,
     txHash: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
     at: Math.floor(Date.now() / 1000),
