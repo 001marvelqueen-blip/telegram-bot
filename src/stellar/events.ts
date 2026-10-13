@@ -471,6 +471,8 @@ function flagInt(name: string, fallback: number, min: number, max: number): numb
     process.exit(1);
   }
   return parsed;
+}
+
 /** True when `--name` appears anywhere in argv (boolean CLI switches). */
 export function hasFlag(name: string): boolean {
   return process.argv.includes(`--${name}`);
@@ -664,6 +666,8 @@ async function main(): Promise<void> {
   if (flagBool("help") || flagBool("h")) {
     console.log(HELP_TEXT);
     return;
+  }
+
   // `--mock` opts into the local mock profile before config is read. An
   // explicit MIMIR_PROFILE in the environment still wins; blank counts as unset.
   if (process.argv.includes("--mock") && !process.env.MIMIR_PROFILE?.trim()) {
@@ -747,8 +751,6 @@ async function main(): Promise<void> {
       console.log(`  ${count.toString().padStart(4)}  ${name}`);
     }
 
-    const toShow = scan.events.slice(-show);
-    for (const event of toShow) {
     for (const event of show > 0 ? scan.events.slice(-show) : []) {
       console.log(`\n  ledger ${event.ledger}  tx ${event.txHash}`);
       console.log(`  ${summarize(event)}`);
