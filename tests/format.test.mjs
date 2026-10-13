@@ -352,8 +352,8 @@ test("txExplorerUrl is centralized and network-aware", async () => {
     explorerBaseUrl: DEFAULT_EXPLORER_BASE_URL,
   };
   assert.equal(
-    txExplorerUrl(testnet, "abcd"),
-    "https://stellar.expert/explorer/testnet/tx/abcd",
+    txExplorerUrl(testnet, "ab".repeat(32)),
+    `https://stellar.expert/explorer/testnet/tx/${"ab".repeat(32)}`,
   );
   assert.equal(
     accountExplorerUrl(testnet, "G" + "A".repeat(55)),
@@ -369,8 +369,8 @@ test("txExplorerUrl is centralized and network-aware", async () => {
     networkPassphrase: "Public Global Stellar Network ; September 2015",
   };
   assert.equal(
-    txExplorerUrl(pub, "ffff"),
-    "https://stellar.expert/explorer/public/tx/ffff",
+    txExplorerUrl(pub, "f".repeat(64)),
+    `https://stellar.expert/explorer/public/tx/${"f".repeat(64)}`,
   );
 
   const custom = { ...testnet, explorerBaseUrl: "https://example.test/x/" };
