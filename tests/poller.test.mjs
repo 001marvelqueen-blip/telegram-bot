@@ -1883,7 +1883,8 @@ test("regression: consecutive failures increment by 1 per all-failed cycle", asy
   await writeFile(cursorFile, CURSOR_FILE, "utf8");
 
   const poller = createPoller({
-    config: { ...baseConfig(cursorFile), pollIntervalMs: 0 },
+    // A long interval keeps the second cycle from racing the assertion.
+    config: baseConfig(cursorFile),
     server: failingServer("both contracts down"),
     send: async () => undefined,
     now: () => 10_000,
