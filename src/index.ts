@@ -137,7 +137,8 @@ async function main(): Promise<void> {
   console.log(`[boot] network      ${networkLabel(config)} (${redactUrl(config.rpcUrl)})`);
   console.log(`[boot] market       ${config.marketContractId}`);
   console.log(`[boot] squad        ${config.squadContractId}`);
-  console.log(`[boot] chat         ${config.chatId}`);
+  // The chat id is a registered secret: say that it is set, never what it is.
+  console.log(`[boot] chat         configured (value redacted)`);
   console.log(
     `[boot] allowlist    ${
       config.allowedChatIds.length === 0

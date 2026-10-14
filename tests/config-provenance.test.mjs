@@ -283,7 +283,15 @@ test("a real boot logs where config came from and never a value", async () => {
       [DIST_INDEX],
       {
         cwd: dir,
-        env: { PATH: process.env.PATH, MIMIR_PROFILE: "mock", HEALTH_PORT: "0" },
+        env: {
+          PATH: process.env.PATH,
+          MIMIR_PROFILE: "mock",
+          HEALTH_PORT: "0",
+          // Fail the unreachable-RPC startup probe fast instead of waiting
+          // out the default 30s deadline, which raced the run timeout.
+          STARTUP_HEALTH_DEADLINE_MS: "1000",
+          STARTUP_HEALTH_RETRY_MS: "100",
+        },
         timeout: 30_000,
       },
     ).then(
