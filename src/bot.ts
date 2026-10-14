@@ -322,6 +322,15 @@ export function statusMessage(config: BotConfig, status: PollerStatus, nowMs: nu
         `  cursor stalled: unchanged for ${target.cyclesWithoutAdvance} successful cycles while behind tip`,
       );
     }
+    if (target.gapLedgers > 0) {
+      lines.push(
+        `  restart gap: ${target.gapLedgers} ledger${target.gapLedgers === 1 ? "" : "s"} unrecoverable, ` +
+          `cursor reset ${ago(target.cursorResetAt, nowMs)}`,
+      );
+    }
+    if (target.cursorUnreadable) {
+      lines.push("  cursor ledger unreadable: position left untouched");
+    }
     if (target.lastError) lines.push(`  last error: ${escapeMd(target.lastError)}`);
   }
 
