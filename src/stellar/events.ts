@@ -217,7 +217,11 @@ export async function paginatedGetEvents(
   // scan output can report how long the network cost, not just how many pages
   // it took. Bounded to counts and milliseconds; no payload is retained.
   const timing = new RpcTiming();
-  const window = validateLedgerWindow(await timing.measure("health", () => server.getHealth()));
+  // A caller-cached tip (one per poll cycle) replaces this walk's own health
+  // read; a one-shot scan still fetches its own.
+  const window = validateLedgerWindow(
+    opts.ledgerTip ?? (await timing.measure("health", () => server.getHealth())),
+  );
   const oldestLedger = window.oldestLedger;
 
   // One window for the whole walk, pre-seeded with what earlier cycles have
