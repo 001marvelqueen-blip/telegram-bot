@@ -227,13 +227,6 @@ export async function paginatedGetEvents(
   for (const id of opts.seenEventIds ?? []) dedup.add(id);
 
   let cursor: string | undefined = opts.cursor;
-  if (cursor) {
-    const cLedger = eventCursorLedger(cursor);
-    if (cLedger !== null && cLedger < oldestLedger) {
-      console.error(`[scanner] cursor ledger ${cLedger} is older than retained window ${oldestLedger}, discarding`);
-      cursor = undefined;
-    }
-  }
 
   const events: rpc.Api.EventResponse[] = [];
   let lastCursor: string | null = cursor ?? null;
