@@ -535,13 +535,15 @@ export interface BotDeps {
  * Returns true when the chat is permitted to use restricted commands.
  *
  * Rules:
- * - If `allowedChatIds` is empty the list is open (any chat may use /status).
+ * - If `allowedChatIds` is empty the list is open (any chat may use the
+ *   gated commands: /status, /health, /contracts, /preview).
  * - Otherwise the incoming chat id must appear in the list. Both the numeric
  *   id (stored as a number in grammy's ctx.chat.id) and its string form are
  *   compared so that negative group ids such as -1001234567890 match correctly.
  */
-function isChatAllowed(allowedChatIds: string[], chatId: number): boolean {
-  if (allowedChatIds.length === 0) return true;
+function isChatAllowed(allowedChatIds: readonly string[] | undefined, chatId: number): boolean {
+  // Hand-built configs (tests, embedders) may omit the list: treat it as open.
+  if (!allowedChatIds || allowedChatIds.length === 0) return true;
   const asString = String(chatId);
   return allowedChatIds.some((allowed) => allowed === asString);
 }
@@ -579,6 +581,18 @@ export function registerCommandHandlers(
   const pause = deps.pause ?? (() => "stopped");
   const resume = deps.resume ?? (() => "stopped");
 
+  /**
+   * Gate for commands that expose deployment details. Requests from
+   * unapproved chats are silently ignored: an error reply would leak the
+   * existence of the restriction, and silence matches privacy-mode bots that
+   * never see most messages. The log lets operators spot misconfigured ids.
+   */
+  const chatAllowed = (ctx: CommandContext<Context>, command: string): boolean => {
+    if (isChatAllowed(config.allowedChatIds, ctx.chat.id)) return true;
+    console.warn(`[bot] /${command} denied for chat ${ctx.chat.id} (not in ALLOWED_CHAT_IDS)`);
+    return false;
+  };
+
   const handlers: Record<typeof COMMANDS[number]["command"], (ctx: CommandContext<Context>) => Promise<void>> = {
     start: async (ctx) => {
       await replyMarkdown(ctx, helpMessage(config));
@@ -589,16 +603,7 @@ export function registerCommandHandlers(
     },
 
     status: async (ctx) => {
-      if (!isChatAllowed(config.allowedChatIds, ctx.chat.id)) {
-        // Silently ignore requests from unapproved chats. Responding with an
-        // error would leak the existence of the restriction; not responding at
-        // all is consistent with privacy-mode bots that simply never see most
-        // messages. Log so operators can diagnose misconfigured chat ids.
-        console.warn(
-          `[bot] /status denied for chat ${ctx.chat.id} (not in ALLOWED_CHAT_IDS)`,
-        );
-        return;
-      }
+      if (!chatAllowed(ctx, "status")) return;
       const startedAt = performance.now();
       let sent = false;
       try {
@@ -648,14 +653,17 @@ export function registerCommandHandlers(
     // Config-only, so this never fails on account of poller or RPC state —
     // unlike /status, it has nothing to report failure on.
     health: async (ctx) => {
+      if (!chatAllowed(ctx, "health")) return;
       await ctx.reply(healthMessage(config, status()), TELEGRAM_OPTIONS);
     },
 
     contracts: async (ctx) => {
+      if (!chatAllowed(ctx, "contracts")) return;
       await ctx.reply(contractsMessage(config), TELEGRAM_OPTIONS);
     },
 
     preview: async (ctx) => {
+      if (!chatAllowed(ctx, "preview")) return;
       const text = ctx.message?.text ?? "";
       const spaceIndex = text.indexOf(" ");
       const arg = spaceIndex !== -1 ? text.slice(spaceIndex + 1).trim() : "";
