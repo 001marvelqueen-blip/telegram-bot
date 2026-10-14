@@ -470,7 +470,7 @@ test("clean checkout: mock RPC, poller, and health server start without credenti
         statusFile: path.join(dir, "status.json"),
         auditFile: path.join(dir, "audit.jsonl"),
         deadLetterFile: path.join(dir, "dead-letter.json"),
-        healthPort: 18791, // distinct from health.test.mjs (18787): suites run in parallel
+        healthPort: 18799, // unique across suites: test files run in parallel
         rpcUrl: mock.url,
       };
       poller = createPoller({ config: pollerConfig, server, send });
