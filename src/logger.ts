@@ -169,7 +169,8 @@ export function renderLogExport(
   now: number = Date.now(),
 ): string {
   const lines: string[] = [];
-  lines.push("Mimir notifier log export");
+  // The version is public build metadata (also on /health), not a secret.
+  lines.push(`Mimir notifier log export · v${config.version ?? "unknown"}`);
   // Network label is display-safe (testnet/public/custom) — not the RPC URL,
   // which could name a private endpoint.
   lines.push(`network: ${networkLabel(config)} · log lines kept: ${capture.capacity()}`);
