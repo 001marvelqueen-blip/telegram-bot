@@ -313,7 +313,7 @@ test("scanner: malformed XDR decodes to unknown and never throws", async () => {
   for (const event of scan.events) {
     assert.equal(event.payload.name, "unknown");
   }
-  assert.match(scan.events[0].payload.reason, /malformed event value XDR/);
+  assert.match(scan.events[0].payload.reason, /malformed XDR value/);
   assert.equal(scan.cursor, makeCursor(1000), "the cursor still advances past a bad event");
   assert.equal(scan.lastEventLedger, 951);
 
