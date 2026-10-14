@@ -2277,6 +2277,10 @@ export function createPoller(deps: PollerDeps) {
         }
       }
 
+      // Per-cycle page telemetry for /status (all targets in this cycle).
+      status.lastCyclePages = cyclePages;
+      status.lastCycleEmptyPages = cycleEmptyPages;
+
       // ── Circuit breaker state update ─────────────────────────────────────────────
       if (cycleFailures > 0) {
         status.circuitBreaker.failureCount += cycleFailures;
