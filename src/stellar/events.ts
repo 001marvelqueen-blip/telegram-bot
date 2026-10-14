@@ -286,9 +286,9 @@ export async function paginatedGetEvents(
         : server.getEvents({ filters, startLedger: firstStartLedger, limit }),
     );
 
-    if (response.events.length === 0) emptyPages += 1;
-    latestLedger = response.latestLedger;
+    // A malformed page (non-array `events`) is an empty page, not a crash.
     const rawEvents = Array.isArray(response?.events) ? response.events : [];
+    if (rawEvents.length === 0) emptyPages += 1;
     // Drop anything an earlier page (or an earlier cycle) already produced.
     // Order is preserved: the first occurrence wins, matching the RPC's own
     // event ordering.
