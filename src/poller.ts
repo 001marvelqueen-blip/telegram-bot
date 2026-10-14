@@ -1781,8 +1781,14 @@ export function createPoller(deps: PollerDeps) {
           source: event.source,
           detail: `${event.payload.name} at ledger ${event.ledger}`,
         });
+        // Same routing as the notifier: a per-source chat, else the default.
+        const chat =
+          (event.source === "market" ? config.marketChatId : config.squadChatId) ||
+          config.chatId ||
+          config.chatIds?.[0];
         console.error(
-          `[poller] send failed for ${event.payload.name} at ledger ${event.ledger} after retries: ` +
+          `[poller] send failed for ${event.payload.name} at ledger ${event.ledger}` +
+            `${chat ? ` to chat ${chat}` : ""} after retries: ` +
             `${errorMessage(err)} correlation=${correlationId}`,
         );
         if (deadLetterEnabled) {
