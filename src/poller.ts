@@ -1521,6 +1521,8 @@ export function createPoller(deps: PollerDeps) {
    * cycle rather than a stale one from boot.
    */
   async function persistStatus(): Promise<void> {
+    // Hand-built configs (tests, embedders) may not set a status file.
+    if (!config.statusFile) return;
     await writeStatusFile(config.statusFile, snapshot());
   }
 
