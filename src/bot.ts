@@ -967,10 +967,6 @@ export function isMarkdownParseError(err: unknown): boolean {
   return true;
 }
 
-const PLAIN_TEXT_OPTIONS = {
-  link_preview_options: { is_disabled: true },
-};
-
 /** Bounded log fragment identifying which event a fallback send belongs to. */
 function eventRefLabel(eventRef: SendExtra["eventRef"]): string {
   if (!eventRef) return "";
@@ -1065,8 +1061,9 @@ export function createNotifier(
             typeof config.botToken === "string" ? [config.botToken] : [],
           )}`,
       );
+      // Plain text (no parse mode), same per-source link preview setting.
       await bot.api.sendMessage(chatId, fallback, {
-        ...PLAIN_TEXT_OPTIONS,
+        link_preview_options: notificationOptions.link_preview_options,
         ...(extra?.reply_markup ? { reply_markup: extra.reply_markup } : {}),
         ...(extra?.replyToMessageId !== undefined
           ? { reply_parameters: { chat_id: chatId, message_id: extra.replyToMessageId } }
