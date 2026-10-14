@@ -259,28 +259,30 @@ function truncatedContractId(contractId: string): string {
  * Used at the boundary where contract IDs enter RPC requests.
  *
  * @param contractId - The contract ID to validate (typically from config)
+ * @param field - Label used in error messages, e.g. "market contract ID"
  * @throws {ContractIdError} When the contract ID is invalid
  */
-export function validateContractId(contractId: unknown): void {
+export function validateContractId(contractId: unknown, field = "contract ID"): true {
   if (typeof contractId !== "string") {
     throw new ContractIdError(
       "empty-value",
-      `contract ID must be a string; got ${typeof contractId}`,
+      `${field} must be a string; got ${typeof contractId}`,
     );
   }
 
   const trimmed = contractId.trim();
   if (trimmed === "") {
-    throw new ContractIdError("empty-value", "contract ID cannot be empty");
+    throw new ContractIdError("empty-value", `${field} cannot be empty`);
   }
 
   if (!CONTRACT_ID_RE.test(trimmed)) {
     throw new ContractIdError(
       "malformed-format",
-      `contract ID is not a Soroban contract ID (expected C… strkey, 56 chars); ` +
-        `got ${truncatedContractId(trimmed)}`,
+      `${field} is not a Soroban contract ID (a valid Soroban contract ID is a ` +
+        `C… strkey, 56 chars); got ${truncatedContractId(trimmed)}`,
     );
   }
+  return true;
 }
 
 /** A ledger sequence we are willing to put into a request. */
