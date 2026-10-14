@@ -29,6 +29,7 @@ import { scValToNative, type rpc, type xdr } from "@stellar/stellar-sdk";
 import type { StellarConfig } from "../config.js";
 import { eventKey } from "../dedup.js";
 import { txExplorerUrl } from "./client.js";
+import { redactText } from "../redact.js";
 
 /** Which of the two Mimir contracts an event came from. */
 export type ContractSource = "market" | "squad";
@@ -477,6 +478,87 @@ function topicAt(topics: unknown[], index: number, what: string): unknown {
     throw new DecodeError(`${what}: missing topic[${index}] (event has ${topics.length} topics)`);
   }
   return topics[index];
+}
+
+// ── Topic schemas ───────────────────────────────────────────────────────────
+
+/** Kind of an indexed topic argument after the event name. */
+export type TopicArgKind = "int" | "address";
+
+export interface TopicSchema {
+  /** Total topic count, including the event name at `topic[0]`. */
+  expectedCount: number;
+  /** Kinds of `topic[1..]`, in order. */
+  args: readonly TopicArgKind[];
+}
+
+/** Indexed topic layout of each mimir-market event the v1 decoder reads. */
+export const MARKET_TOPIC_SCHEMAS: Readonly<Record<string, TopicSchema>> = {
+  claim_created: { expectedCount: 3, args: ["int", "address"] },
+  claim_challenged: { expectedCount: 3, args: ["int", "address"] },
+  claim_resolved: { expectedCount: 2, args: ["int"] },
+  claim_cancelled: { expectedCount: 2, args: ["int"] },
+  market_settled: { expectedCount: 2, args: ["int"] },
+  challenger_paid: { expectedCount: 3, args: ["int", "address"] },
+  fee_claimed: { expectedCount: 2, args: ["address"] },
+  withdrawal: { expectedCount: 2, args: ["address"] },
+  withdrawal_pending: { expectedCount: 2, args: ["address"] },
+};
+
+/** Indexed topic layout of each mimir-squad event the v1 decoder reads. */
+export const SQUAD_TOPIC_SCHEMAS: Readonly<Record<string, TopicSchema>> = {
+  market_created: { expectedCount: 3, args: ["int", "address"] },
+  deposited: { expectedCount: 4, args: ["int", "int", "address"] },
+  withdrawn: { expectedCount: 4, args: ["int", "int", "address"] },
+  resolved: { expectedCount: 2, args: ["int"] },
+  claimed: { expectedCount: 3, args: ["int", "address"] },
+  fees_claimed: { expectedCount: 2, args: ["address"] },
+};
+
+export type TopicSchemaResult = { valid: true } | { valid: false; reason: string };
+
+/**
+ * Check already-native topics (`topic[0]` is the event name) against the
+ * documented layout. Events without a schema (admin events, future names) are
+ * accepted: the decoder, not this check, decides whether it can read them.
+ * Reasons are bounded and never echo the offending value.
+ */
+export function validateTopicSchema(
+  source: ContractSource,
+  eventName: string,
+  topics: readonly unknown[],
+): TopicSchemaResult {
+  const schemas = source === "market" ? MARKET_TOPIC_SCHEMAS : SQUAD_TOPIC_SCHEMAS;
+  const schema = Object.prototype.hasOwnProperty.call(schemas, eventName)
+    ? schemas[eventName]
+    : undefined;
+  if (!schema) return { valid: true };
+
+  if (topics.length !== schema.expectedCount) {
+    return {
+      valid: false,
+      reason: `${eventName}: expected ${schema.expectedCount} topics, got ${topics.length}`,
+    };
+  }
+  for (const [offset, kind] of schema.args.entries()) {
+    const index = offset + 1;
+    const what = `${eventName}.topic[${index}]`;
+    try {
+      if (kind === "int") big(topics[index], what);
+      else addr(topics[index], what);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Keep the expectation, drop the echoed value.
+      return { valid: false, reason: diagnostic(message.replace(/, got .*$/, "")) };
+    }
+  }
+  return { valid: true };
+}
+
+/** Redact credential-shaped substrings from a decode reason and cap its length. */
+export function sanitizeReason(reason: unknown, maxLen: number = MAX_DIAGNOSTIC_LENGTH): string {
+  const compact = String(reason ?? "").replace(/\s+/g, " ").trim() || "unknown error";
+  return redactText(compact, { maxLen: Math.max(1, maxLen) });
 }
 
 // ── Per-contract version decoders ────────────────────────────────────────────
@@ -1025,6 +1107,13 @@ export function decodeEvent(
       eventName = Buffer.from(first).toString("utf8");
     } else {
       eventName = "";
+    }
+    if (eventName === "") {
+      // Without a name no decoder can be chosen; say why instead of "no decoder".
+      return {
+        ...meta,
+        payload: { name: "unknown", eventName, reason: "topic[0] is not an event name string" },
+      };
     }
 
     // Fail closed before native conversion allocates: an oversized value must
