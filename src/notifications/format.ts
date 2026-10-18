@@ -25,6 +25,7 @@ import {
   type DecodedEvent,
 } from "../stellar/decode.js";
 import { groupDigestEvents } from "./digest-grouping.js";
+import { confidenceIndicator } from "./confidence.js";
 import type { StellarConfig } from "../config.js";
 import {
   EXPLORER_BUTTON_TEXT,
@@ -373,7 +374,7 @@ function headline(event: DecodedEvent): string | null {
       return NOTIFICATION_MD.claimResolved(
         String(p.claimId),
         escapeMd(winnerSideLabel(p.winnerSide)),
-        escapeMd(String(p.confidence)),
+        escapeMd(confidenceIndicator(p.confidence)),
         p.summary ? escapeMd(clip(p.summary)) : null,
       );
 
@@ -553,7 +554,7 @@ function plainHeadline(event: DecodedEvent): string | null {
       return NOTIFICATION_PLAIN.claimResolved(
         p.claimId,
         winnerSideLabel(p.winnerSide),
-        String(p.confidence),
+        confidenceIndicator(p.confidence),
         p.summary ? clip(p.summary) : null,
       );
 
